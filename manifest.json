@@ -1,7 +1,7 @@
 {
-  "name": "WBCYN Registrar Dashboard",
-  "short_name": "WBCYN Dashboard",
-  "description": "Official Work Management System for the Registrar, West Bengal Council of Yoga and Naturopathy",
+  "name": "JM Digital Office",
+  "short_name": "JM Office",
+  "description": "Dr. M. Jahangir's personal digital workspace, including the WBCYN Registrar Dashboard and other tools.",
   "start_url": "./index.html",
   "scope": "./",
   "id": "./index.html",

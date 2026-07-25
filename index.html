@@ -3,50 +3,109 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<title>WBCYN Registrar Dashboard</title>
+<title>JM Digital Office</title>
 
-<!-- PWA: manifest + theme -->
+<!-- PWA -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b3d66">
 
 <!-- iOS "Add to Home Screen" support -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="WBCYN Dashboard">
+<meta name="apple-mobile-web-app-title" content="JM Digital Office">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 
-<link rel="stylesheet" href="styles.css">
-<!-- Chart.js: loaded from CDN and cached by the service worker on first successful load,
-     so report charts keep working offline afterwards. If the very first launch is offline,
-     charts show a text fallback until a connection is available once. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<link rel="stylesheet" href="launcher.css">
 </head>
 <body>
 
-<header class="appheader no-print">
-  <div class="header-left">
-    <h1>WBCYN Registrar Dashboard</h1>
-    <p>Official Work Management System</p>
-  </div>
-  <div class="header-right">
-    <div class="name" id="headerRegistrarName">Dr. M. Jahangir</div>
-    <div class="role" id="headerRegistrarRole">Registrar, WBCYN</div>
-  </div>
+<header class="appheader">
+  <h1>JM Digital Office</h1>
+  <p>Dr. M. Jahangir &middot; Personal Digital Workspace</p>
 </header>
 
-<nav class="topnav no-print" id="topnav"></nav>
+<main class="launcher">
+  <div class="cards-grid">
 
-<main id="app"></main>
+    <a class="app-card" href="wbcyn/index.html">
+      <span class="status active">Active</span>
+      <span class="icon">📋</span>
+      <h2>WBCYN Registrar</h2>
+      <p>Official work management system for the Registrar, WBCYN.</p>
+    </a>
 
-<nav class="bottomnav no-print" id="bottomnav"></nav>
+    <a class="app-card inactive" href="coming-soon.html?title=Clinic%20Manager&icon=%F0%9F%8F%A5&desc=Patient%20records%2C%20appointments%20and%20billing%20in%20one%20place.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🏥</span>
+      <h2>Clinic Manager</h2>
+      <p>Patient records, appointments and billing.</p>
+    </a>
 
-<div id="modalRoot"></div>
+    <a class="app-card inactive" href="coming-soon.html?title=Dr.%20Nurul%20Islam%20Memorial%20Charitable%20Trust&icon=%F0%9F%A4%9D&desc=Administration%2C%20records%20and%20activities%20of%20the%20Trust.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🤝</span>
+      <h2>Dr. Nurul Islam Memorial Charitable Trust</h2>
+      <p>Trust administration and records.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Rental%20Manager&icon=%F0%9F%8F%A0&desc=Track%20tenants%2C%20rent%20collection%20and%20maintenance.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🏠</span>
+      <h2>Rental Manager</h2>
+      <p>Track tenants, rent and maintenance.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Patient%20Statistics&icon=%F0%9F%93%88&desc=Analytics%20and%20insights%20from%20patient%20data.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">📈</span>
+      <h2>Patient Statistics</h2>
+      <p>Analytics and patient data insights.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Health%20%26%20Fitness&icon=%F0%9F%92%AA&desc=Personal%20health%20and%20fitness%20tracking.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">💪</span>
+      <h2>Health & Fitness</h2>
+      <p>Personal health and fitness tracker.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Trek%20Planner&icon=%F0%9F%A5%BE&desc=Plan%20treks%20and%20outdoor%20expeditions.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🥾</span>
+      <h2>Trek Planner</h2>
+      <p>Plan treks and outdoor expeditions.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Ghurontu%20SOTTA&icon=%F0%9F%A7%B3&desc=Travel%20and%20trip%20planning.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🧳</span>
+      <h2>Ghurontu SOTTA</h2>
+      <p>Travel and trip planning.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Personal%20Planner&icon=%F0%9F%97%93%EF%B8%8F&desc=Tasks%2C%20goals%20and%20daily%20planning.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🗓️</span>
+      <h2>Personal Planner</h2>
+      <p>Tasks, goals and daily planning.</p>
+    </a>
+
+    <a class="app-card inactive" href="coming-soon.html?title=Documents%20%26%20Backup&icon=%F0%9F%97%84%EF%B8%8F&desc=Central%20document%20vault%20and%20backups.">
+      <span class="status soon">Coming Soon</span>
+      <span class="icon">🗄️</span>
+      <h2>Documents & Backup</h2>
+      <p>Central document vault and backups.</p>
+    </a>
+
+  </div>
+</main>
+
 <div id="pwaBannerRoot"></div>
 
-<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device</footer>
+<footer class="small-note">JM Digital Office &middot; All data stored locally on this device</footer>
 
-<script src="app.js"></script>
+<script src="launcher.js"></script>
 </body>
 </html>

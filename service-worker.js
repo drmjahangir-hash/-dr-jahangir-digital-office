@@ -1,23 +1,37 @@
 'use strict';
 
-/* WBCYN Registrar Dashboard - Service Worker
-   Precaches the full app shell so the app works completely offline after first load. */
+/* JM Digital Office - Service Worker
+   Precaches the entire project (launcher + all sub-apps, e.g. /wbcyn/) so the
+   whole site works completely offline after first load. This single service
+   worker is registered from every page using a relative path that resolves to
+   this same file, so its scope automatically covers the whole project root -
+   no matter whether the project is hosted at a domain root or in a GitHub
+   Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'wbcyn-dashboard-v1';
+const CACHE_VERSION = 'jm-digital-office-v1';
 
-// Core app shell - must all be same-origin and always available.
+// Core app shell - same-origin, always available.
 const CORE_ASSETS = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './launcher.css',
+  './launcher.js',
+  './coming-soon.html',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/apple-touch-icon.png'
+  './icons/apple-touch-icon.png',
+
+  './wbcyn/index.html',
+  './wbcyn/app.js',
+  './wbcyn/styles.css',
+  './wbcyn/icons/icon-192.png',
+  './wbcyn/icons/icon-512.png',
+  './wbcyn/icons/apple-touch-icon.png'
 ];
 
-// Third-party chart library - cached best-effort so it doesn't block install if offline.
+// Third-party libraries used by sub-apps - cached best-effort so a missing
+// connection at install time never blocks the rest of the app shell.
 const OPTIONAL_ASSETS = [
   'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js'
 ];
@@ -31,7 +45,7 @@ self.addEventListener('install', (event) => {
         OPTIONAL_ASSETS.map((url) =>
           fetch(url, { mode: 'cors' })
             .then((resp) => cache.put(url, resp))
-            .catch(() => {/* offline on first install: chart library will cache on first successful online load instead */})
+            .catch(() => {/* will be cached on first successful online fetch instead */})
         )
       );
     })
@@ -62,7 +76,7 @@ self.addEventListener('fetch', (event) => {
           return resp;
         })
         .catch(() => {
-          // Offline and not cached: fall back to the app shell for navigations.
+          // Offline and not cached: fall back to the launcher for navigations.
           if (req.mode === 'navigate') return caches.match('./index.html');
           return undefined;
         });

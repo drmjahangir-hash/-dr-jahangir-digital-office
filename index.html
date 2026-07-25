@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>WBCYN Registrar Dashboard</title>
+
+<!-- PWA: manifest + theme -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b3d66">
+
+<!-- iOS "Add to Home Screen" support -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WBCYN Dashboard">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+
+<link rel="stylesheet" href="styles.css">
+<!-- Chart.js: loaded from CDN and cached by the service worker on first successful load,
+     so report charts keep working offline afterwards. If the very first launch is offline,
+     charts show a text fallback until a connection is available once. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="appheader no-print">
+  <div class="header-left">
+    <h1>WBCYN Registrar Dashboard</h1>
+    <p>Official Work Management System</p>
+  </div>
+  <div class="header-right">
+    <div class="name" id="headerRegistrarName">Dr. M. Jahangir</div>
+    <div class="role" id="headerRegistrarRole">Registrar, WBCYN</div>
+  </div>
+</header>
+
+<nav class="topnav no-print" id="topnav"></nav>
+
+<main id="app"></main>
+
+<nav class="bottomnav no-print" id="bottomnav"></nav>
+
+<div id="modalRoot"></div>
+<div id="pwaBannerRoot"></div>
+
+<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

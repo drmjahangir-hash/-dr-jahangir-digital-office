@@ -19,6 +19,7 @@ button{font-family:inherit;cursor:pointer;}
 header.appheader{background:linear-gradient(135deg,var(--dark-blue),var(--dark-blue-2));color:#fff;padding:26px 20px;text-align:center;}
 header.appheader h1{margin:0;font-size:26px;font-weight:800;letter-spacing:.3px;}
 header.appheader p{margin:6px 0 0;font-size:14.5px;color:#cfe3f7;}
+header.appheader p.version-tag{margin-top:4px;font-size:11.5px;color:rgba(255,255,255,.65);}
 
 main.launcher{max-width:1080px;margin:0 auto;padding:22px 16px 50px;}
 

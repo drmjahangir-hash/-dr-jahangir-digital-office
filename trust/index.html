@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>Dr. Nurul Islam Memorial Charitable Trust Manager</title>
+
+<!-- PWA -->
+<link rel="manifest" href="../manifest.json">
+<meta name="theme-color" content="#0b3d66">
+
+<!-- iOS "Add to Home Screen" support -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trust Manager">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="appheader">
+  <div class="header-left">
+    <a class="home-link" href="../index.html">⌂ <span class="home-link-text">JM Digital Office</span></a>
+    <h1>🤝 Trust Manager</h1>
+    <p>Dr. Nurul Islam Memorial Charitable Trust</p>
+  </div>
+  <div class="header-right" id="headerRight">
+    <div class="name" id="headerTrustName">Dr. Nurul Islam Memorial Charitable Trust</div>
+    <div class="role">Administration System</div>
+  </div>
+  <button id="notifBellBtn" class="notif-bell no-print" title="Notifications">🔔<span id="notifBadge" class="notif-badge" style="display:none;">0</span></button>
+</header>
+
+<nav class="topnav" id="topnav"></nav>
+
+<main id="app"></main>
+
+<nav class="bottomnav" id="bottomnav"></nav>
+
+<button class="fab-quick-add no-print" id="fabQuickAdd" style="display:none;"></button>
+
+<div id="modalRoot"></div>
+<div id="pwaBannerRoot"></div>
+
+<footer class="small-note no-print" id="trustFooter">Trust Manager Module</footer>
+
+<script src="../sw-update.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1567,7 +1567,9 @@ function renderInstallBanner(){
 function registerServiceWorker(){
   if('serviceWorker' in navigator){
     window.addEventListener('load', ()=>{
-      navigator.serviceWorker.register('../service-worker.js').catch(err=>{
+      navigator.serviceWorker.register('../service-worker.js').then(reg=>{
+        if(typeof window.attachSWUpdateWatcher==='function') window.attachSWUpdateWatcher(reg);
+      }).catch(err=>{
         console.warn('Service worker registration failed:', err);
       });
     });

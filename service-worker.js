@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v3';
+const CACHE_VERSION = 'jm-digital-office-v7';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [
@@ -16,6 +16,7 @@ const CORE_ASSETS = [
   './index.html',
   './launcher.css',
   './launcher.js',
+  './sw-update.js',
   './coming-soon.html',
   './manifest.json',
   './icons/icon-192.png',
@@ -34,7 +35,14 @@ const CORE_ASSETS = [
   './clinic/styles.css',
   './clinic/icons/icon-192.png',
   './clinic/icons/icon-512.png',
-  './clinic/icons/apple-touch-icon.png'
+  './clinic/icons/apple-touch-icon.png',
+
+  './trust/index.html',
+  './trust/app.js',
+  './trust/styles.css',
+  './trust/icons/icon-192.png',
+  './trust/icons/icon-512.png',
+  './trust/icons/apple-touch-icon.png'
 ];
 
 // Third-party libraries used by sub-apps - cached best-effort so a missing
@@ -43,8 +51,25 @@ const OPTIONAL_ASSETS = [
   'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js'
 ];
 
+// Lets the update-prompt banner (sw-update.js) force this worker to take over
+// immediately once the user taps "Reload", instead of waiting for every open
+// tab/PWA instance to be closed first (which is what leaves iPhone PWAs stuck
+// on an old version indefinitely, since a home-screen PWA is rarely "closed").
+self.addEventListener('message', (event) => {
+  if(event.data && event.data.type === 'SKIP_WAITING'){
+    self.skipWaiting();
+  }
+});
+
+// NOTE: skipWaiting() is intentionally NOT called here. A newly installed
+// worker is left in the "waiting" state so the page can show the "New
+// version available. Reload?" prompt (see sw-update.js) and only activate
+// once the user confirms - via the postMessage handler above. This avoids
+// silently swapping the running app out from under someone mid-form-entry,
+// while still guaranteeing the new version takes over immediately (no
+// waiting for every open tab/installed PWA to fully close) the moment the
+// user taps Reload.
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_VERSION).then(async (cache) => {
       await cache.addAll(CORE_ASSETS);

@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v11';
+const CACHE_VERSION = 'jm-digital-office-v12';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [
@@ -17,6 +17,8 @@ const CORE_ASSETS = [
   './launcher.css',
   './launcher.js',
   './sw-update.js',
+  './home-nav.js',
+  './home-nav.css',
   './coming-soon.html',
   './manifest.json',
   './icons/icon-192.png',
@@ -99,26 +101,45 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Page navigations (clicking the Home button, loading any module's index.html,
+// etc.) are NETWORK-FIRST: always try to fetch the current HTML over the
+// network before ever considering the cache. This is what stops a stale
+// cached page from being able to break navigation - the Home button (and any
+// other link) always resolves against whatever HTML is actually live, the
+// moment the device is online, with no dependency on the update-prompt banner
+// having been accepted first. The cache is only used as an offline fallback.
+function handleNavigation(req) {
+  return fetch(req)
+    .then((resp) => {
+      if (resp && resp.status === 200) {
+        const copy = resp.clone();
+        caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy));
+      }
+      return resp;
+    })
+    .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')));
+}
+
+// Everything else (CSS/JS/images/fonts) stays CACHE-FIRST for speed and full
+// offline support, refreshing the cache in the background from the network.
+function handleAsset(req) {
+  return caches.match(req).then((cached) => {
+    if (cached) return cached;
+    return fetch(req)
+      .then((resp) => {
+        if (resp && (resp.status === 200 || resp.type === 'opaque')) {
+          const copy = resp.clone();
+          caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy));
+        }
+        return resp;
+      })
+      .catch(() => undefined);
+  });
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
-  event.respondWith(
-    caches.match(req).then((cached) => {
-      if (cached) return cached;
-      return fetch(req)
-        .then((resp) => {
-          if (resp && (resp.status === 200 || resp.type === 'opaque')) {
-            const copy = resp.clone();
-            caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy));
-          }
-          return resp;
-        })
-        .catch(() => {
-          // Offline and not cached: fall back to the launcher for navigations.
-          if (req.mode === 'navigate') return caches.match('./index.html');
-          return undefined;
-        });
-    })
-  );
+  event.respondWith(req.mode === 'navigate' ? handleNavigation(req) : handleAsset(req));
 });

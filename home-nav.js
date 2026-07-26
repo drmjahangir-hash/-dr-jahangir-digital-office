@@ -3,21 +3,30 @@
 /* ============================================================================
    JM Digital Office - Shared "Back to Launcher" Navigation Component
    ----------------------------------------------------------------------------
-   Loaded by every active module (WBCYN, Clinic, Trust - and available to
-   Rental Manager too) so the Home button behaves identically everywhere,
-   including iOS home-screen installed apps ("standalone" mode), where a
-   plain relative <a href="../index.html"> can be unreliable:
+   Loaded by every active module (Rental Manager, WBCYN, Clinic, Trust) so the
+   Home button behaves identically everywhere, including iOS home-screen
+   installed apps ("standalone" mode).
 
-   - iOS standalone webviews can silently ignore relative-link navigation in
-     some situations (varies by iOS version and how the app was installed).
-     Resolving the link to a fully-qualified absolute URL and driving the
-     navigation explicitly via window.location.assign() on click is far more
-     reliable than depending on the browser to resolve + follow a bare
-     relative href by itself.
-   - Never uses window.history (back/forward/go) - a step in the launcher's
-     own navigation history is not guaranteed to exist (e.g. if the module
-     was opened directly, as its own home-screen icon), so "back" is not a
-     substitute for "go to the launcher".
+   Root cause this works around: WebKit has documented, reproducible bugs
+   where navigation from an iOS standalone/home-screen web app can silently
+   fail even though the identical page works fine as a normal Safari tab
+   (see e.g. webkit.org bug 211018 and multiple Apple Developer Forum reports
+   of PWA navigation freezing/hanging in standalone mode only). The
+   accompanying fix in service-worker.js stops the service worker from
+   intercepting page navigations at all, which removes one major trigger.
+   This file removes another: it never depends on the browser resolving a
+   bare relative href by itself, and it never touches browser history.
+
+   - The launcher URL is calculated safely from the current page location
+     (new URL('../index.html', location.href)), so it is always correct
+     whether running at http://localhost:PORT/rental/, or on GitHub Pages at
+     https://<user>.github.io/-dr-jahangir-digital-office/rental/, etc. -
+     no hard-coded domain or username anywhere.
+   - Navigation is driven explicitly on click via
+     window.location.replace(absoluteUrl) - a same-window, direct navigation
+     that does not add a browser-history entry (so there is nothing for a
+     "back" gesture to interact with) and does not depend on history, tab
+     target, or window.close().
 
    Usage: each module's index.html includes this after its own stylesheet/
    scripts, with no other markup changes required:
@@ -44,7 +53,7 @@
 
   function goHome(event) {
     if (event) event.preventDefault();
-    window.location.assign(resolvedLauncherUrl());
+    window.location.replace(resolvedLauncherUrl());
   }
 
   function upgradeLink(link) {
@@ -53,9 +62,6 @@
     link.setAttribute('target', '_self');
     if (!link.getAttribute('aria-label')) link.setAttribute('aria-label', LABEL);
     if (!link.getAttribute('title')) link.setAttribute('title', LABEL);
-    // Belt-and-braces: explicit click handling instead of relying solely on
-    // native <a> navigation, which is the part that has proven unreliable
-    // inside iOS standalone PWAs.
     link.addEventListener('click', goHome);
   }
 

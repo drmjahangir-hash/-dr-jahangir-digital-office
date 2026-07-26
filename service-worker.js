@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v12';
+const CACHE_VERSION = 'jm-digital-office-v13';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [
@@ -101,27 +101,9 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Page navigations (clicking the Home button, loading any module's index.html,
-// etc.) are NETWORK-FIRST: always try to fetch the current HTML over the
-// network before ever considering the cache. This is what stops a stale
-// cached page from being able to break navigation - the Home button (and any
-// other link) always resolves against whatever HTML is actually live, the
-// moment the device is online, with no dependency on the update-prompt banner
-// having been accepted first. The cache is only used as an offline fallback.
-function handleNavigation(req) {
-  return fetch(req)
-    .then((resp) => {
-      if (resp && resp.status === 200) {
-        const copy = resp.clone();
-        caches.open(CACHE_VERSION).then((cache) => cache.put(req, copy));
-      }
-      return resp;
-    })
-    .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')));
-}
-
-// Everything else (CSS/JS/images/fonts) stays CACHE-FIRST for speed and full
-// offline support, refreshing the cache in the background from the network.
+// Everything except page navigations (CSS/JS/images/fonts) stays CACHE-FIRST
+// for speed and full offline support, refreshing the cache in the background
+// from the network.
 function handleAsset(req) {
   return caches.match(req).then((cached) => {
     if (cached) return cached;
@@ -141,5 +123,24 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
-  event.respondWith(req.mode === 'navigate' ? handleNavigation(req) : handleAsset(req));
+  // Page navigations (opening any module, tapping the Home button, etc.) are
+  // deliberately NOT intercepted with respondWith() at all - they are left
+  // to the browser's normal networking, exactly as an ordinary Safari tab
+  // handles them. This is intentional: WebKit has documented, reproducible
+  // bugs where a service worker's handling of navigation requests
+  // (event.respondWith on a "navigate"-mode fetch) can silently fail or
+  // hang specifically inside an iOS standalone/home-screen "web clip",
+  // even though the exact same worker code runs fine for a normal Safari
+  // tab, and even though asset fetches from the same worker work fine in
+  // both contexts. One well-documented trigger is a service-worker update
+  // activating while a navigation is already in flight, which causes
+  // WebKit to kill that in-flight page load outright. Letting navigations
+  // pass through untouched removes the service worker from that failure
+  // path entirely, which is what actually fixes "Home button does nothing
+  // in the installed app, but works in Safari" - it was never a caching
+  // problem. Static assets are unaffected and still get full offline
+  // support below.
+  if (req.mode === 'navigate') return;
+
+  event.respondWith(handleAsset(req));
 });

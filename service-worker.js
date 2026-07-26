@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v9';
+const CACHE_VERSION = 'jm-digital-office-v10';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [

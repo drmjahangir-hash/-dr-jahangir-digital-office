@@ -204,7 +204,25 @@ nav.bottomnav{display:none;}
 .print-slip .slip-head h2{margin:0;color:var(--dark-blue);}
 .print-slip .slip-row{display:flex;justify-content:space-between;font-size:13.5px;margin-bottom:4px;}
 .print-slip .slip-body{margin-top:16px;font-size:15px;line-height:1.7;}
+.print-slip .slip-body hr{border:none;border-top:1px solid var(--border);margin:10px 0;}
 .print-slip .slip-sign{margin-top:60px;text-align:right;font-size:13.5px;}
+.print-slip.receipt-pro .slip-head h3{color:var(--dark-blue);letter-spacing:.5px;}
+.print-slip .slip-custom-header{text-align:center;font-size:12.5px;color:var(--muted);margin-bottom:8px;}
+.print-slip .slip-custom-footer{text-align:center;font-size:11.5px;color:var(--muted);margin-top:14px;border-top:1px solid var(--border);padding-top:8px;}
+
+/* Analytics charts (native inline SVG, no external chart library) */
+.chart-block{background:var(--light-blue);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px;}
+.chart-block h4{margin:0 0 10px;color:var(--dark-blue);font-size:14.5px;}
+.chart-block svg{width:100%;height:auto;display:block;}
+.chart-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px;}
+.chart-legend span.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:middle;}
+.analytics-toggle{cursor:pointer;user-select:none;}
+
+/* Occupancy overview unit cards */
+.occ-unit-card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;}
+.occ-unit-card .occ-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.occ-unit-card .occ-head b{color:var(--dark-blue);}
+.occ-unit-card .occ-meta{font-size:12.5px;color:var(--muted);line-height:1.6;}
 footer.small-note{text-align:center;color:var(--muted);font-size:11.5px;padding:14px;}
 
 .pwa-install-banner{position:fixed;left:12px;right:12px;bottom:12px;background:var(--dark-blue);color:#fff;padding:12px 14px;border-radius:10px;display:flex;align-items:center;gap:10px;z-index:80;box-shadow:0 4px 16px rgba(0,0,0,.25);}
@@ -234,9 +252,9 @@ header.appheader{flex-wrap:nowrap;}
 .notification-card{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;background:var(--white);border:1px solid var(--border);border-left:6px solid var(--muted);border-radius:10px;padding:12px 14px;margin-bottom:10px;}
 .notification-card.unread{background:var(--light-blue);}
 .notification-card.priority-Urgent{border-left-color:var(--red);}
-.notification-card.priority-High{border-left-color:var(--orange);}
-.notification-card.priority-Medium{border-left-color:var(--accent);}
-.notification-card.priority-Low{border-left-color:var(--muted);}
+.notification-card.priority-Important{border-left-color:var(--orange);}
+.notification-card.priority-Upcoming{border-left-color:var(--accent);}
+.notification-card.priority-Information{border-left-color:var(--muted);}
 
 /* Property summary cards (Rental Manager) */
 .property-card{background:var(--light-blue);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px;}

@@ -112,18 +112,72 @@ function validateRentalBackup(obj){
 /* ---------------------------------------------------------------------- */
 /* DATA MODEL                                                             */
 /* ---------------------------------------------------------------------- */
+const SCHEMA_VERSION = 2;
+const DEFAULT_REMINDER_TEMPLATES = {
+  rentReminderTemplate:
+`Dear {{tenantName}},
+This is a reminder regarding the rent for {{propertyName}}, Unit {{unitNumber}}, for {{month}} {{year}}.
+Rent: {{rentAmount}}
+Electricity: {{electricityAmount}}
+Other Charges: {{otherCharges}}
+Previous Due: {{previousDue}}
+Total Payable: {{totalPayable}}
+Due Date: {{dueDate}}
+Kindly arrange payment at your convenience.
+Regards,
+{{ownerSignatureName}}`,
+  electricityReminderTemplate:
+`Dear {{tenantName}},
+This is a reminder regarding the electricity bill for {{propertyName}}, Unit {{unitNumber}}, for {{month}} {{year}}.
+Units Consumed: {{unitsConsumed}}
+Rate: {{ratePerUnit}}/unit
+Electricity Charge: {{electricityAmount}}
+Previous Outstanding: {{previousDue}}
+Total Payable: {{totalPayable}}
+Kindly arrange payment at your convenience.
+Regards,
+{{ownerSignatureName}}`,
+  combinedBillReminderTemplate:
+`Dear {{tenantName}},
+Your combined monthly bill for {{propertyName}}, Unit {{unitNumber}}, for {{month}} {{year}} is ready.
+Rent: {{rentAmount}}
+Maintenance: {{maintenanceAmount}}
+Electricity: {{electricityAmount}}
+Water: {{waterAmount}}
+Parking: {{parkingAmount}}
+Other: {{otherCharges}}
+Previous Due: {{previousDue}}
+Total Payable: {{totalPayable}}
+Kindly arrange payment at your convenience.
+Regards,
+{{ownerSignatureName}}`,
+  paymentAcknowledgementTemplate:
+`Dear {{tenantName}},
+We acknowledge receipt of {{amountReceived}} towards {{purpose}} for {{propertyName}}, Unit {{unitNumber}}, on {{paymentDate}}.
+Thank you.
+Regards,
+{{ownerSignatureName}}`
+};
 function freshDB(){
   return {
-    settings:{
+    schemaVersion: SCHEMA_VERSION,
+    settings: Object.assign({
       ownerName:'', ownerAddress:'', ownerPhone:'', ownerEmail:'',
+      ownerSignatureName:'Dr. M. Jahangir',
+      receiptHeader:'', receiptFooter:'',
+      whatsappCountryCode:'+91',
       defaultElectricityRate:12,
       defaultRentDueDay:5,
       defaultLateFee:0,
+      lateFeeEnabled:false,
+      monthlyBillingDay:1,
+      meterReadingReminderDay:25,
       receiptPrefix:'RENT',
       electricityBillPrefix:'ELEC',
+      billNumberPrefix:'BILL',
       currency:'INR',
       dateFormat:'DD/MM/YYYY'
-    },
+    }, DEFAULT_REMINDER_TEMPLATES),
     // Only the two named properties are preloaded, and only their Name is
     // filled in. No floor numbers, unit numbers or addresses are invented —
     // the user fills those in via Edit Property.
@@ -141,18 +195,25 @@ function freshDB(){
     expenses:[],
     complaints:[],
     agreements:[],
-    notificationState:{ readIds:[], deletedIds:[] },
+    backupHistory:[],
+    notificationState:{ readIds:[], deletedIds:[], snoozedUntil:{} },
     nextIds:{property:3, unit:1, tenant:1, occupancy:1, rentPayment:1, electricityBill:1, combinedBill:1, deposit:1, expense:1, complaint:1, agreement:1}
   };
 }
+// Safe, additive schema migration. Never deletes existing records — only
+// fills in missing keys introduced by later versions (v1.4.0 added
+// reminder templates, backupHistory, combinedBill status, notification
+// snoozing, and several new settings fields). Existing Rental Manager data
+// (properties, units, tenants, bills, payments, etc.) is always preserved.
 function ensureShape(db){
   const fresh = freshDB();
   db.settings = Object.assign({}, fresh.settings, db.settings||{});
-  ['properties','units','tenants','occupancyHistory','rentPayments','electricityBills','combinedBills','deposits','expenses','complaints','agreements']
+  ['properties','units','tenants','occupancyHistory','rentPayments','electricityBills','combinedBills','deposits','expenses','complaints','agreements','backupHistory']
     .forEach(k=>{ if(!Array.isArray(db[k])) db[k] = []; });
   db.notificationState = Object.assign({}, fresh.notificationState, db.notificationState||{});
   if(!Array.isArray(db.notificationState.readIds)) db.notificationState.readIds = [];
   if(!Array.isArray(db.notificationState.deletedIds)) db.notificationState.deletedIds = [];
+  if(!db.notificationState.snoozedUntil || typeof db.notificationState.snoozedUntil!=='object') db.notificationState.snoozedUntil = {};
   db.nextIds = Object.assign({}, fresh.nextIds, db.nextIds||{});
   db.properties.forEach(p=>{ if(p.status===undefined) p.status='Active'; });
   db.units.forEach(u=>{ if(!Array.isArray(u.attachments)) u.attachments = []; });
@@ -161,6 +222,16 @@ function ensureShape(db){
   db.complaints.forEach(c=>{ if(!Array.isArray(c.attachments)) c.attachments = []; });
   db.agreements.forEach(a=>{ if(!Array.isArray(a.attachments)) a.attachments = []; });
   db.electricityBills.forEach(b=>{ if(!Array.isArray(b.attachments)) b.attachments = []; });
+  // v1.4.0: combined/monthly bills gained a status field. Any bill saved
+  // before this version was, by definition, already final — migrate it to
+  // 'Finalised' (or 'Paid' if fully settled) rather than leaving it blank,
+  // so paid-bill protection logic works correctly on old data too.
+  db.combinedBills.forEach(c=>{
+    if(!c.status){
+      c.status = combinedBalanceDue(c)<=0 ? 'Paid' : (Number(c.amountReceived)>0 ? 'Partly Paid' : 'Finalised');
+    }
+  });
+  db.schemaVersion = SCHEMA_VERSION;
   return db;
 }
 let db;
@@ -178,6 +249,11 @@ function nextId(prefix, key){
   const n = db.nextIds[key]||1;
   db.nextIds[key] = n+1;
   return prefix + '-' + String(n).padStart(4,'0');
+}
+function nextCombinedBillNumber(year){
+  year = year || new Date().getFullYear();
+  const seq = db.combinedBills.filter(c=>String(c.year)===String(year)).length + 1;
+  return (db.settings.billNumberPrefix||'BILL') + '/' + year + '/' + String(seq).padStart(3,'0');
 }
 
 /* ---------------------------------------------------------------------- */
@@ -369,12 +445,26 @@ const SETTINGS_FIELDS = [
   {key:'ownerAddress', label:'Owner Address', type:'textarea'},
   {key:'ownerPhone', label:'Owner Phone', type:'text'},
   {key:'ownerEmail', label:'Owner Email', type:'text'},
+  {key:'ownerSignatureName', label:'Owner Signature Name', type:'text'},
+  {key:'receiptHeader', label:'Receipt Header (optional)', type:'textarea'},
+  {key:'receiptFooter', label:'Receipt Footer (optional)', type:'textarea'},
+  {key:'whatsappCountryCode', label:'Default WhatsApp Country Code', type:'text'},
   {key:'defaultElectricityRate', label:'Default Electricity Rate (₹ per unit)', type:'number'},
   {key:'defaultRentDueDay', label:'Default Rent Due Day', type:'number'},
+  {key:'monthlyBillingDay', label:'Monthly Billing Day', type:'number'},
+  {key:'meterReadingReminderDay', label:'Meter Reading Reminder Day', type:'number'},
+  {key:'lateFeeEnabled', label:'Enable Late Fee', type:'select', options:['Yes','No']},
   {key:'defaultLateFee', label:'Default Late Fee (₹)', type:'number'},
-  {key:'receiptPrefix', label:'Receipt Prefix', type:'text'},
+  {key:'receiptPrefix', label:'Receipt Number Prefix', type:'text'},
   {key:'electricityBillPrefix', label:'Electricity Bill Prefix', type:'text'},
+  {key:'billNumberPrefix', label:'Bill Number Prefix (Combined / Monthly)', type:'text'},
   {key:'dateFormat', label:'Date Format', type:'select', options:['DD/MM/YYYY','MM/DD/YYYY','YYYY-MM-DD']}
+];
+const REMINDER_TEMPLATE_FIELDS = [
+  {key:'rentReminderTemplate', label:'Rent Reminder Template', type:'textarea'},
+  {key:'electricityReminderTemplate', label:'Electricity Reminder Template', type:'textarea'},
+  {key:'combinedBillReminderTemplate', label:'Combined Bill Reminder Template', type:'textarea'},
+  {key:'paymentAcknowledgementTemplate', label:'Payment Acknowledgement Template', type:'textarea'}
 ];
 
 /* ---------------------------------------------------------------------- */
@@ -466,14 +556,18 @@ const MAIN_NAV = [
   {id:'settings', label:'Settings', icon:'⚙️'}
 ];
 const MORE_SUBS = [
+  {id:'billingCentre', label:'Monthly Billing Centre', icon:'🧮'},
+  {id:'occupancy', label:'Occupancy Overview', icon:'🏘️'},
   {id:'rent', label:'Rent Collection', icon:'💵'},
   {id:'electricity', label:'Electricity', icon:'⚡'},
   {id:'combinedBills', label:'Combined Bills', icon:'🧾'},
+  {id:'receiptHistory', label:'Receipt History', icon:'🧻'},
   {id:'deposits', label:'Deposits', icon:'🏦'},
   {id:'expenses', label:'Expenses', icon:'💸'},
   {id:'maintenance', label:'Maintenance', icon:'🛠️'},
   {id:'agreements', label:'Agreements', icon:'📜'},
   {id:'occupancyHistory', label:'Occupancy History', icon:'🕐'},
+  {id:'profitLoss', label:'Profit &amp; Loss', icon:'📈'},
   {id:'reports', label:'Reports', icon:'📊'},
   {id:'notifications', label:'Notifications', icon:'🔔'}
 ];
@@ -483,7 +577,8 @@ const FAMILY_GROUP = {
   tenants: ['tenants','tenantForm','tenantProfile'],
   more: ['rent','rentForm','electricity','electricityForm','combinedBills','combinedBillForm',
     'deposits','depositForm','expenses','expenseForm','maintenance','maintenanceForm',
-    'agreements','agreementForm','occupancyHistory','reports','notifications']
+    'agreements','agreementForm','occupancyHistory','reports','notifications',
+    'billingCentre','occupancy','receiptHistory','profitLoss']
 };
 function mainNavActiveId(){
   for(const k in FAMILY_GROUP){ if(FAMILY_GROUP[k].includes(state.view)) return k; }
@@ -627,8 +722,295 @@ function openModal(title, bodyHTML, footHTML){
 function closeModal(){ document.getElementById('modalRoot').innerHTML=''; }
 
 /* ---------------------------------------------------------------------- */
+/* WHATSAPP TENANT REMINDERS                                              */
+/* The app never sends a message automatically. It only ever opens        */
+/* WhatsApp / WhatsApp Web with a pre-filled, user-editable message that   */
+/* the user must review and tap Send themselves.                          */
+/* ---------------------------------------------------------------------- */
+function fillTemplate(tpl, data){
+  return String(tpl||'').replace(/\{\{(\w+)\}\}/g, (m,k)=> (data[k]!==undefined && data[k]!==null && data[k]!=='') ? data[k] : '—');
+}
+// Validates and normalises an Indian mobile number for WhatsApp. Returns
+// {ok:true, number:'91XXXXXXXXXX'} or {ok:false, reason:'...'}.
+function normalizeIndianMobile(raw, countryCode){
+  countryCode = (countryCode||'+91').replace(/\D/g,'') || '91';
+  if(!raw) return {ok:false, reason:'No mobile or WhatsApp number saved for this tenant.'};
+  let digits = String(raw).replace(/[^\d]/g,'');
+  if(digits.length===12 && digits.startsWith(countryCode)) digits = digits.slice(countryCode.length);
+  if(digits.length===11 && digits.startsWith('0')) digits = digits.slice(1);
+  if(digits.length!==10){
+    return {ok:false, reason:`"${raw}" does not look like a valid 10-digit Indian mobile number.`};
+  }
+  return {ok:true, number: countryCode+digits};
+}
+function tenantWhatsAppNumber(tenant){
+  return normalizeIndianMobile(tenant.whatsapp||tenant.mobile, db.settings.whatsappCountryCode);
+}
+function buildWhatsAppLink(number, message){
+  return 'https://wa.me/'+number+'?text='+encodeURIComponent(message);
+}
+// Opens an editable-message modal. `tenant` supplies the phone number;
+// `initialMessage` is the pre-filled, fully-editable draft text. Nothing is
+// sent until the user reviews the text and explicitly taps "Send via WhatsApp".
+function openWhatsAppReminderModal(tenant, initialMessage){
+  if(!tenant){ alert('No tenant linked to this record.'); return; }
+  openModal('💬 WhatsApp Reminder — '+tenant.name, `
+    <div class="form-field full">
+      <label>To: ${escapeHtml(tenant.name)} (${escapeHtml(tenant.whatsapp||tenant.mobile||'no number saved')})</label>
+      <textarea id="waMessageBox" rows="10">${escapeHtml(initialMessage)}</textarea>
+    </div>
+    <div id="waValidationNote" style="font-size:12.5px;color:var(--muted);margin-top:6px;"></div>
+  `, `<button class="btn grey" id="waCancel">Cancel</button><button class="btn" id="waSend">✅ Send via WhatsApp</button>`);
+  document.getElementById('waCancel').onclick = closeModal;
+  document.getElementById('waSend').onclick = ()=>{
+    const check = tenantWhatsAppNumber(tenant);
+    if(!check.ok){
+      document.getElementById('waValidationNote').textContent = check.reason+' Please add/correct it in the tenant profile first.';
+      return;
+    }
+    const message = document.getElementById('waMessageBox').value;
+    const link = buildWhatsAppLink(check.number, message);
+    window.open(link, '_blank');
+    closeModal();
+  };
+}
+function waRentReminder(rentPaymentOrTenant, unit, prop, rentRec){
+  const t = rentPaymentOrTenant;
+  const data = {
+    tenantName:t.name, propertyName:prop?prop.name:'', unitNumber:unit?unit.unitNumber:'',
+    month:rentRec?rentRec.rentMonth:MONTH_NAMES[new Date().getMonth()], year:rentRec?rentRec.rentYear:new Date().getFullYear(),
+    rentAmount:formatCurrency(rentRec?rentRec.rentAmount:t.monthlyRent),
+    electricityAmount:formatCurrency(0), otherCharges:formatCurrency(rentRec?rentRec.otherCharges:0),
+    previousDue:formatCurrency(rentRec?rentRec.previousRentDue:0),
+    totalPayable:formatCurrency(rentRec?rentTotalPayable(rentRec):t.monthlyRent),
+    dueDate:formatDate(todayISO()), ownerSignatureName:db.settings.ownerSignatureName||db.settings.ownerName||'Management'
+  };
+  return fillTemplate(db.settings.rentReminderTemplate, data);
+}
+function waRentOverdueReminder(t, unit, prop, dueDateISO){
+  return `Dear ${t.name},\n\nYour rent for ${prop?prop.name:''}, Unit ${unit?unit.unitNumber:''} was due on ${formatDate(dueDateISO)} and is now overdue. Kindly arrange payment at the earliest to avoid late fees.\n\nRegards,\n${db.settings.ownerSignatureName||db.settings.ownerName||'Management'}`;
+}
+function waElectricityReminder(t, unit, prop, bill){
+  const data = {
+    tenantName:t.name, propertyName:prop?prop.name:'', unitNumber:unit?unit.unitNumber:'',
+    month:bill.billingMonth, year:bill.billingYear, unitsConsumed:billUnitsConsumed(bill), ratePerUnit:formatCurrency(bill.ratePerUnit),
+    electricityAmount:formatCurrency(billElectricityCharge(bill)), previousDue:formatCurrency(bill.previousOutstanding),
+    totalPayable:formatCurrency(billTotalPayable(bill)), ownerSignatureName:db.settings.ownerSignatureName||db.settings.ownerName||'Management'
+  };
+  return fillTemplate(db.settings.electricityReminderTemplate, data);
+}
+function waCombinedBillReminder(t, unit, prop, c){
+  const data = {
+    tenantName:t.name, propertyName:prop?prop.name:'', unitNumber:unit?unit.unitNumber:'',
+    month:c.month, year:c.year, rentAmount:formatCurrency(c.rentAmount), maintenanceAmount:formatCurrency(c.maintenance),
+    electricityAmount:formatCurrency(c.electricity), waterAmount:formatCurrency(c.water), parkingAmount:formatCurrency(c.parking),
+    otherCharges:formatCurrency(c.other), previousDue:formatCurrency((Number(c.previousRentDue)||0)+(Number(c.previousElectricityDue)||0)),
+    totalPayable:formatCurrency(combinedTotalPayable(c)), ownerSignatureName:db.settings.ownerSignatureName||db.settings.ownerName||'Management'
+  };
+  return fillTemplate(db.settings.combinedBillReminderTemplate, data);
+}
+function waPartialBalanceReminder(t, unit, prop, balance, context){
+  return `Dear ${t.name},\n\nA partial payment balance of ${formatCurrency(balance)} remains outstanding for ${prop?prop.name:''}, Unit ${unit?unit.unitNumber:''} (${context||'account'}). Kindly clear the balance at your convenience.\n\nRegards,\n${db.settings.ownerSignatureName||db.settings.ownerName||'Management'}`;
+}
+function waAgreementExpiryReminder(t, unit, prop, agreement){
+  return `Dear ${t.name},\n\nYour rental agreement for ${prop?prop.name:''}, Unit ${unit?unit.unitNumber:''} is due to expire on ${formatDate(agreement.endDate)}. Kindly let us know if you wish to renew or vacate.\n\nRegards,\n${db.settings.ownerSignatureName||db.settings.ownerName||'Management'}`;
+}
+function waDepositSettlementReminder(t, unit, prop, deposit){
+  return `Dear ${t.name},\n\nRegarding your security deposit of ${formatCurrency(deposit.depositAmount)} for ${prop?prop.name:''}, Unit ${unit?unit.unitNumber:''}: refundable amount is ${formatCurrency(deposit.refundableAmount||deposit.depositAmount)} after adjustments. We will process settlement shortly.\n\nRegards,\n${db.settings.ownerSignatureName||db.settings.ownerName||'Management'}`;
+}
+function waAcknowledgementReminder(t, unit, prop, amount, purpose, dateISO){
+  const data = {
+    tenantName:t.name, propertyName:prop?prop.name:'', unitNumber:unit?unit.unitNumber:'',
+    amountReceived:formatCurrency(amount), purpose:purpose||'payment', paymentDate:formatDate(dateISO||todayISO()),
+    ownerSignatureName:db.settings.ownerSignatureName||db.settings.ownerName||'Management'
+  };
+  return fillTemplate(db.settings.paymentAcknowledgementTemplate, data);
+}
+// Central dispatcher used by all "Send WhatsApp Reminder" buttons across the
+// app (tenant profile, outstanding lists, agreement list, monthly bill list).
+function sendWhatsAppReminder(kind, recordId){
+  let tenant, unit, prop, message;
+  switch(kind){
+    case 'tenant-general':{
+      tenant = tenantById(recordId); if(!tenant) return;
+      unit = unitById(tenant.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = waRentReminder(tenant, unit, prop, null);
+      break;
+    }
+    case 'rent':{
+      const r = db.rentPayments.find(x=>x.id===recordId); if(!r) return;
+      tenant = tenantById(r.tenantId); unit = unitById(r.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = rentBalanceDue(r)>0 ? waPartialBalanceReminder(tenant, unit, prop, rentBalanceDue(r), 'rent') : waRentReminder(tenant, unit, prop, r);
+      break;
+    }
+    case 'electricity':{
+      const b = db.electricityBills.find(x=>x.id===recordId); if(!b) return;
+      tenant = tenantById(b.tenantId); unit = unitById(b.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = waElectricityReminder(tenant, unit, prop, b);
+      break;
+    }
+    case 'combined':{
+      const c = db.combinedBills.find(x=>x.id===recordId); if(!c) return;
+      tenant = tenantById(c.tenantId); unit = unitById(c.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = waCombinedBillReminder(tenant, unit, prop, c);
+      break;
+    }
+    case 'agreement':{
+      const a = db.agreements.find(x=>x.id===recordId); if(!a) return;
+      tenant = tenantById(a.tenantId); unit = unitById(a.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = waAgreementExpiryReminder(tenant, unit, prop, a);
+      break;
+    }
+    case 'deposit':{
+      const d = db.deposits.find(x=>x.id===recordId); if(!d) return;
+      tenant = tenantById(d.tenantId); unit = unitById(d.unitId); prop = unit?propertyById(unit.propertyId):null;
+      message = waDepositSettlementReminder(tenant, unit, prop, d);
+      break;
+    }
+    default: return;
+  }
+  if(!tenant){ alert('Tenant not found for this record.'); return; }
+  openWhatsAppReminderModal(tenant, message);
+}
+
+/* ---------------------------------------------------------------------- */
 /* DASHBOARD                                                              */
 /* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
+/* NATIVE SVG CHARTS — no external chart library, works fully offline.    */
+/* ---------------------------------------------------------------------- */
+const CHART_COLORS = {blue:'#0b3d66', accent:'#1565c0', green:'#2e7d32', orange:'#fb8c00', red:'#e53935', purple:'#6a1b9a', grey:'#9aa7b3'};
+function svgEmptyState(label){
+  return `<div class="empty-note">${escapeHtml(label||'No data available for this selection yet.')}</div>`;
+}
+// Horizontal grouped bar chart — up to 2 series per row (e.g. Expected vs Collected).
+function svgGroupedHBarChart(items, seriesLabels, colors){
+  if(!items.length) return svgEmptyState();
+  const w = 640, leftPad = 130, rightPad = 90, rowH = 46, gap = 10, topPad = 10;
+  const max = Math.max(1, ...items.map(it=>Math.max(it.a||0, it.b!==undefined?it.b:0)));
+  const h = topPad*2 + items.length*(rowH+gap);
+  const bars = items.map((it,i)=>{
+    const y = topPad + i*(rowH+gap);
+    const barAreaW = w-leftPad-rightPad;
+    const wA = Math.max(2, barAreaW*((it.a||0)/max));
+    const hasB = it.b!==undefined;
+    const wB = hasB ? Math.max(2, barAreaW*((it.b||0)/max)) : 0;
+    return `
+      <text x="${leftPad-8}" y="${y+12}" text-anchor="end" font-size="11" fill="#333">${escapeHtml(it.label)}</text>
+      <rect x="${leftPad}" y="${y}" width="${wA}" height="14" rx="3" fill="${colors[0]}"></rect>
+      <text x="${leftPad+wA+6}" y="${y+11}" font-size="10.5" fill="#333">${escapeHtml(formatCurrency(it.a||0))}</text>
+      ${hasB?`<rect x="${leftPad}" y="${y+18}" width="${wB}" height="14" rx="3" fill="${colors[1]}"></rect>
+      <text x="${leftPad+wB+6}" y="${y+29}" font-size="10.5" fill="#333">${escapeHtml(formatCurrency(it.b||0))}</text>`:''}
+    `;
+  }).join('');
+  const legend = `<div class="chart-legend"><span><span class="sw" style="background:${colors[0]}"></span>${escapeHtml(seriesLabels[0])}</span>${seriesLabels[1]?`<span><span class="sw" style="background:${colors[1]}"></span>${escapeHtml(seriesLabels[1])}</span>`:''}</div>`;
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="chart">${bars}</svg>${legend}`;
+}
+// Simple donut chart for 2+ segments (e.g. Occupied vs Vacant, expense categories).
+function svgDonutChart(segments){
+  segments = segments.filter(s=>s.value>0);
+  if(!segments.length) return svgEmptyState();
+  const total = segments.reduce((s,x)=>s+x.value,0);
+  const cx=90, cy=90, r=70, sw=28;
+  let angle = -90;
+  const circumference = 2*Math.PI*r;
+  const arcs = segments.map(seg=>{
+    const frac = seg.value/total;
+    const dash = frac*circumference;
+    const arc = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${seg.color}" stroke-width="${sw}" stroke-dasharray="${dash} ${circumference-dash}" stroke-dashoffset="${-((angle+90)/360)*circumference}" transform="rotate(-90 ${cx} ${cy})"></circle>`;
+    angle += frac*360;
+    return arc;
+  }).join('');
+  const legend = `<div class="chart-legend">${segments.map(s=>`<span><span class="sw" style="background:${s.color}"></span>${escapeHtml(s.label)}: ${escapeHtml(formatCurrency(s.value))} (${Math.round((s.value/total)*100)}%)</span>`).join('')}</div>`;
+  return `<svg viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="donut chart" style="max-width:220px;margin:0 auto;display:block;">${arcs}<text x="90" y="94" text-anchor="middle" font-size="13" fill="#333">${escapeHtml(formatCurrency(total))}</text></svg>${legend}`;
+}
+function monthKeysInRange(fromDate, toDate, fallbackCount){
+  const keys = [];
+  if(fromDate && toDate){
+    let d = new Date(fromDate.slice(0,7)+'-01T00:00:00');
+    const end = new Date(toDate.slice(0,7)+'-01T00:00:00');
+    let guard = 0;
+    while(d<=end && guard<24){ keys.push(d.toISOString().slice(0,7)); d.setMonth(d.getMonth()+1); guard++; }
+  }else{
+    const now = new Date();
+    for(let i=fallbackCount-1;i>=0;i--){
+      const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      keys.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'));
+    }
+  }
+  return keys;
+}
+function monthKeyLabel(key){
+  const [y,m] = key.split('-');
+  return MONTH_NAMES[Number(m)-1].slice(0,3)+' '+y;
+}
+state.analytics = state.analytics || {propertyId:'all', from:'', to:'', collapsed:true};
+function analyticsPropertyMatches(propertyId){ return state.analytics.propertyId==='all' || state.analytics.propertyId===propertyId; }
+function renderAnalytics(){
+  const a = state.analytics;
+  const months = monthKeysInRange(a.from, a.to, 6);
+
+  const rentItems = months.map(mk=>{
+    const [y,m] = mk.split('-'); const monthName = MONTH_NAMES[Number(m)-1];
+    const recs = db.rentPayments.filter(r=>r.rentMonth===monthName && String(r.rentYear)===String(Number(y)) && (a.propertyId==='all'||(unitById(r.unitId)&&unitById(r.unitId).propertyId===a.propertyId)));
+    return {label:monthKeyLabel(mk), a:recs.reduce((s,r)=>s+rentTotalPayable(r),0), b:recs.reduce((s,r)=>s+(Number(r.amountReceived)||0),0)};
+  });
+  const elecItems = months.map(mk=>{
+    const [y,m] = mk.split('-'); const monthName = MONTH_NAMES[Number(m)-1];
+    const recs = db.electricityBills.filter(b=>b.billingMonth===monthName && String(b.billingYear)===String(Number(y)) && (a.propertyId==='all'||(unitById(b.unitId)&&unitById(b.unitId).propertyId===a.propertyId)));
+    return {label:monthKeyLabel(mk), a:recs.reduce((s,b)=>s+billTotalPayable(b),0), b:recs.reduce((s,b)=>s+(Number(b.amountPaid)||0),0)};
+  });
+  const incomeExpenseItems = months.map(mk=>{
+    const rentRecs = db.rentPayments.filter(r=>(r.paymentDate||'').slice(0,7)===mk && (a.propertyId==='all'||(unitById(r.unitId)&&unitById(r.unitId).propertyId===a.propertyId)));
+    const elecRecs = db.electricityBills.filter(b=>(b.paymentDate||'').slice(0,7)===mk && (a.propertyId==='all'||(unitById(b.unitId)&&unitById(b.unitId).propertyId===a.propertyId)));
+    const expRecs = db.expenses.filter(e=>(e.date||'').slice(0,7)===mk && (a.propertyId==='all'||e.propertyId===a.propertyId));
+    const income = rentRecs.reduce((s,r)=>s+(Number(r.amountReceived)||0),0) + elecRecs.reduce((s,b)=>s+(Number(b.amountPaid)||0),0);
+    const expense = expRecs.reduce((s,e)=>s+(Number(e.amount)||0),0);
+    return {label:monthKeyLabel(mk), a:income, b:expense};
+  });
+  const outstandingByProperty = db.properties.filter(p=>analyticsPropertyMatches(p.id)).map(p=>{
+    const s = propertyStats(p.id);
+    return {label:p.name, a:s.totalOutstanding};
+  });
+  const unitsInScope = db.units.filter(u=>analyticsPropertyMatches(u.propertyId));
+  const occVacSegments = [
+    {label:'Occupied', value:unitsInScope.filter(u=>u.status==='Occupied').length, color:CHART_COLORS.green},
+    {label:'Vacant', value:unitsInScope.filter(u=>u.status==='Vacant').length, color:CHART_COLORS.grey},
+    {label:'Under Maintenance', value:unitsInScope.filter(u=>u.status==='Under Maintenance').length, color:CHART_COLORS.orange},
+    {label:'Reserved', value:unitsInScope.filter(u=>u.status==='Reserved').length, color:CHART_COLORS.accent}
+  ];
+  const expensesInScope = db.expenses.filter(e=>analyticsPropertyMatches(e.propertyId) && (!a.from||e.date>=a.from) && (!a.to||e.date<=a.to));
+  const expenseByCategory = {};
+  expensesInScope.forEach(e=>{ expenseByCategory[e.category] = (expenseByCategory[e.category]||0)+(Number(e.amount)||0); });
+  const expenseColors = [CHART_COLORS.blue,CHART_COLORS.accent,CHART_COLORS.orange,CHART_COLORS.purple,CHART_COLORS.red,CHART_COLORS.green,CHART_COLORS.grey];
+  const expenseSegments = Object.keys(expenseByCategory).map((cat,i)=>({label:cat, value:expenseByCategory[cat], color:expenseColors[i%expenseColors.length]}));
+
+  const propOpts = ['<option value="all">All Properties</option>'].concat(db.properties.map(p=>`<option value="${p.id}" ${a.propertyId===p.id?'selected':''}>${escapeHtml(p.name)}</option>`)).join('');
+
+  return `
+    <div class="section-title analytics-toggle no-print" data-action="toggle-analytics">📈 Analytics ${a.collapsed?'▸':'▾'}</div>
+    ${a.collapsed?'':`
+    <div class="toolbar no-print">
+      <select id="anaProperty">${propOpts}</select>
+      <label style="font-size:12.5px;">From <input type="date" id="anaFrom" value="${escapeHtml(a.from)}"></label>
+      <label style="font-size:12.5px;">To <input type="date" id="anaTo" value="${escapeHtml(a.to)}"></label>
+    </div>
+    <div class="chart-block"><h4>Monthly Rent Expected vs Collected</h4>${svgGroupedHBarChart(rentItems, ['Expected','Collected'], [CHART_COLORS.blue, CHART_COLORS.green])}</div>
+    <div class="chart-block"><h4>Monthly Electricity Billed vs Collected</h4>${svgGroupedHBarChart(elecItems, ['Billed','Collected'], [CHART_COLORS.purple, CHART_COLORS.green])}</div>
+    <div class="chart-block"><h4>Income vs Expense</h4>${svgGroupedHBarChart(incomeExpenseItems, ['Income','Expense'], [CHART_COLORS.green, CHART_COLORS.red])}</div>
+    <div class="chart-block"><h4>Outstanding by Property</h4>${svgGroupedHBarChart(outstandingByProperty, ['Outstanding'], [CHART_COLORS.red])}</div>
+    <div class="chart-block"><h4>Occupied vs Vacant Units</h4>${svgDonutChart(occVacSegments)}</div>
+    <div class="chart-block"><h4>Expense Category Summary</h4>${svgDonutChart(expenseSegments)}</div>
+    `}
+  `;
+}
+function attachAnalyticsHandlers(){
+  const p = document.getElementById('anaProperty'), from = document.getElementById('anaFrom'), to = document.getElementById('anaTo');
+  if(p) p.addEventListener('change', ()=>{ state.analytics.propertyId = p.value; render(); });
+  if(from) from.addEventListener('change', ()=>{ state.analytics.from = from.value; render(); });
+  if(to) to.addEventListener('change', ()=>{ state.analytics.to = to.value; render(); });
+}
+
 function renderDashboard(){
   const units = db.units;
   const thisMonth = todayISO().slice(0,7);
@@ -679,6 +1061,7 @@ function renderDashboard(){
   }).join('') || '<div class="empty-note">No properties yet.</div>';
   return `
     <div class="cards-grid">${cardsHtml}</div>
+    ${renderDashboardAlerts()}
     <div class="quick-actions no-print">
       <button class="btn" data-action="goto" data-view="propertyForm">➕ Add Property</button>
       <button class="btn secondary" data-action="goto" data-view="unitForm">➕ Add Unit</button>
@@ -691,6 +1074,33 @@ function renderDashboard(){
     </div>
     <div class="section-title">🏢 Properties</div>
     ${propCards}
+    ${renderAnalytics()}
+  `;
+}
+// A compact, high-visibility alert strip shown at the top of the Dashboard —
+// separate from (and linking to) the full Notification Centre.
+function renderDashboardAlerts(){
+  const all = computeNotifications();
+  const unread = all.filter(n=>!n.read);
+  const top = unread.filter(n=>n.priority==='Urgent'||n.priority==='Important').slice(0,5);
+  if(!unread.length) return '';
+  const rows = top.map(n=>`
+    <div class="notification-card unread priority-${n.priority}" style="margin-bottom:8px;">
+      <div style="flex:1;min-width:0;cursor:pointer;" data-action="open-notification" data-linkview="${n.linkView}" data-linkid="${n.linkId||''}">
+        <div style="font-weight:700;">${escapeHtml(n.title)}</div>
+        <div style="font-size:12px;color:var(--muted);">${escapeHtml(n.module)} · <span class="badge ${notificationBadgeClass(n.priority)}">${n.priority}</span></div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn sm secondary" data-action="mark-notification-read" data-nid="${n.id}">Mark Read</button>
+        <button class="btn sm secondary" data-action="snooze-notification" data-nid="${n.id}">Snooze</button>
+        <button class="btn sm danger" data-action="delete-notification" data-nid="${n.id}">Dismiss</button>
+      </div>
+    </div>`).join('');
+  return `
+    <div class="section-title">🔔 Alerts (${unread.length} unread)
+      <button class="btn sm secondary no-print" data-action="goto" data-view="notifications">View All</button>
+    </div>
+    ${rows}
   `;
 }
 
@@ -1068,6 +1478,7 @@ function renderTenantProfile(id){
       <div class="profile-actions no-print">
         <button class="btn secondary" data-action="edit-tenant" data-id="${t.id}">Edit</button>
         ${canVacate?`<button class="btn secondary" data-action="vacate-tenant" data-id="${t.id}">🚪 Vacate</button>`:''}
+        <button class="btn secondary" data-action="whatsapp-reminder" data-kind="tenant-general" data-recid="${t.id}">💬 WhatsApp Reminder</button>
         <button class="btn secondary" data-action="print-view">🖨️ Print Profile</button>
         <button class="btn grey" data-action="goto" data-view="tenants">Back</button>
       </div>
@@ -1094,6 +1505,114 @@ function vacateTenantFlow(id){
   vacateUnit(unit);
   saveDB();
   goto('tenantProfile', t.id);
+}
+
+/* ---------------------------------------------------------------------- */
+/* OCCUPANCY OVERVIEW (live property/floor/unit snapshot)                */
+/* ---------------------------------------------------------------------- */
+state.occupancy = state.occupancy || {propertyFilter:'all', floorFilter:'all', catFilter:'all', statusFilter:'all', expiringOnly:false};
+function unitOutstanding(unit){
+  const rentOut = db.rentPayments.filter(r=>r.unitId===unit.id).reduce((s,r)=>s+Math.max(0,rentBalanceDue(r)),0);
+  const elecOut = db.electricityBills.filter(b=>b.unitId===unit.id).reduce((s,b)=>s+Math.max(0,billBalanceDue(b)),0);
+  return rentOut+elecOut;
+}
+function unitAgreementExpiry(unit){
+  const tenant = currentTenantForUnit(unit.id);
+  if(!tenant) return null;
+  const list = db.agreements.filter(a=>a.tenantId===tenant.id && a.renewalStatus!=='Terminated').slice().sort((a,b)=>a.endDate<b.endDate?1:-1);
+  return list[0] ? list[0].endDate : null;
+}
+function unitMeterReadingDue(unit){
+  const last = lastElectricityBillForUnit(unit.id);
+  if(!last) return unit.status==='Occupied';
+  const d = daysBetween(last.currReadingDate, todayISO());
+  return d!==null && d>35;
+}
+function unitFloorsForProperty(propertyId){
+  const floors = new Set();
+  db.units.filter(u=>propertyId==='all' || u.propertyId===propertyId).forEach(u=>{ if(u.floor) floors.add(u.floor); });
+  return Array.from(floors);
+}
+function renderOccupancy(){
+  const oc = state.occupancy;
+  let units = db.units.slice();
+  if(oc.propertyFilter!=='all') units = units.filter(u=>u.propertyId===oc.propertyFilter);
+  if(oc.floorFilter!=='all') units = units.filter(u=>u.floor===oc.floorFilter);
+  if(oc.catFilter==='Residential') units = units.filter(u=>u.category==='Residential Flat');
+  if(oc.catFilter==='Commercial') units = units.filter(u=>u.category && u.category!=='Residential Flat');
+  if(oc.statusFilter!=='all') units = units.filter(u=>(u.status||'Vacant')===oc.statusFilter);
+  if(oc.expiringOnly) units = units.filter(u=>{ const d=daysBetween(todayISO(), unitAgreementExpiry(u)); return d!==null && d>=0 && d<=90; });
+
+  const allUnits = oc.propertyFilter==='all' ? db.units : db.units.filter(u=>u.propertyId===oc.propertyFilter);
+  const occupied = allUnits.filter(u=>u.status==='Occupied').length;
+  const vacant = allUnits.filter(u=>u.status==='Vacant').length;
+  const residential = allUnits.filter(u=>u.category==='Residential Flat').length;
+  const commercial = allUnits.filter(u=>u.category && u.category!=='Residential Flat').length;
+  const occPct = allUnits.length ? Math.round((occupied/allUnits.length)*100) : 0;
+  const vacantRentPotential = allUnits.filter(u=>u.status==='Vacant').reduce((s,u)=>s+(Number(u.monthlyRent)||0),0);
+  const summaryCards = [
+    {n:allUnits.length, l:'Total Units'}, {n:occupied, l:'Occupied Units'}, {n:vacant, l:'Vacant Units'},
+    {n:residential, l:'Residential Units'}, {n:commercial, l:'Commercial Units'},
+    {n:occPct+'%', l:'Occupancy Percentage'}, {n:formatCurrency(vacantRentPotential), l:'Vacant Monthly Rent Potential'}
+  ].map(c=>`<div class="card"><div class="num">${c.n}</div><div class="lbl">${c.l}</div></div>`).join('');
+
+  const propOpts = ['<option value="all">All Properties</option>'].concat(db.properties.map(p=>`<option value="${p.id}" ${oc.propertyFilter===p.id?'selected':''}>${escapeHtml(p.name)}</option>`)).join('');
+  const floorOpts = ['<option value="all">All Floors</option>'].concat(unitFloorsForProperty(oc.propertyFilter).map(f=>`<option value="${escapeHtml(f)}" ${oc.floorFilter===f?'selected':''}>${escapeHtml(f)}</option>`)).join('');
+  const catOpts = ['all','Residential','Commercial'].map(c=>`<option value="${c}" ${oc.catFilter===c?'selected':''}>${c==='all'?'All Types':c}</option>`).join('');
+  const statusOpts = ['<option value="all">All Status</option>'].concat(UNIT_STATUSES.map(s=>`<option value="${s}" ${oc.statusFilter===s?'selected':''}>${s}</option>`)).join('');
+
+  // Group filtered units by property, then by floor.
+  const byProperty = {};
+  units.forEach(u=>{ (byProperty[u.propertyId] = byProperty[u.propertyId]||[]).push(u); });
+  const groupsHtml = Object.keys(byProperty).map(pid=>{
+    const prop = propertyById(pid);
+    const propUnits = byProperty[pid];
+    const byFloor = {};
+    propUnits.forEach(u=>{ const f = u.floor||'(No floor set)'; (byFloor[f]=byFloor[f]||[]).push(u); });
+    const floorsHtml = Object.keys(byFloor).sort().map(floor=>{
+      const cards = byFloor[floor].map(u=>{
+        const tenant = currentTenantForUnit(u.id);
+        const expiry = unitAgreementExpiry(u);
+        const outstanding = unitOutstanding(u);
+        const meterDue = unitMeterReadingDue(u);
+        const statusClass = u.status==='Occupied'?'badge-green':u.status==='Vacant'?'badge-grey':u.status==='Under Maintenance'?'badge-orange':'badge-blue';
+        return `<div class="occ-unit-card">
+          <div class="occ-head"><b>${escapeHtml(u.unitNumber)}</b><span class="badge ${statusClass}">${escapeHtml(u.status)||'Vacant'}</span></div>
+          <div class="occ-meta">
+            Floor: ${escapeHtml(floor)} · ${escapeHtml(u.category)||'—'}<br>
+            Tenant: ${escapeHtml(tenant?tenant.name:'—')} · Rent: ${formatCurrency(u.monthlyRent)}<br>
+            Agreement Expiry: ${expiry?formatDate(expiry):'—'} · Outstanding: ${formatCurrency(outstanding)}<br>
+            Meter Reading: ${meterDue?'<span class="badge badge-orange">Due</span>':'<span class="badge badge-green">Up to date</span>'}
+          </div>
+          <div class="no-print" style="margin-top:8px;"><button class="btn sm secondary" data-action="view-unit" data-id="${u.id}">Open Unit</button></div>
+        </div>`;
+      }).join('');
+      return `<div class="section-title" style="margin-top:14px;">Floor: ${escapeHtml(floor)}</div><div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));">${cards}</div>`;
+    }).join('');
+    return `<div class="property-card"><h3>🏢 ${escapeHtml(prop?prop.name:'—')}</h3>${floorsHtml}</div>`;
+  }).join('') || '<div class="empty-note">No units match the selected filters.</div>';
+
+  return moreSubtabsHTML('occupancy') + `
+    <div class="cards-grid">${summaryCards}</div>
+    <div class="toolbar no-print">
+      <select id="occProperty">${propOpts}</select>
+      <select id="occFloor">${floorOpts}</select>
+      <select id="occCat">${catOpts}</select>
+      <select id="occStatus">${statusOpts}</select>
+      <label style="font-size:12.5px;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="occExpiring" ${oc.expiringOnly?'checked':''}> Agreement expiring soon</label>
+    </div>
+    ${groupsHtml}
+  `;
+}
+function attachOccupancyHandlers(){
+  const oc = state.occupancy;
+  const map = {occProperty:'propertyFilter', occFloor:'floorFilter', occCat:'catFilter', occStatus:'statusFilter'};
+  Object.keys(map).forEach(elId=>{
+    const el = document.getElementById(elId);
+    if(el) el.addEventListener('change', ()=>{ oc[map[elId]] = el.value; if(elId==='occProperty') oc.floorFilter='all'; render(); });
+  });
+  const expiringBox = document.getElementById('occExpiring');
+  if(expiringBox) expiringBox.addEventListener('change', ()=>{ oc.expiringOnly = expiringBox.checked; render(); });
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1140,6 +1659,7 @@ function renderRent(){
       <td><span class="badge ${status==='Paid'?'badge-green':status==='Partly Paid'?'badge-orange':'badge-red'}">${status}</span></td>
       <td class="actions-cell">
         <button class="btn sm secondary" data-action="print-rent-receipt" data-id="${r.id}">Print</button>
+        ${status!=='Paid'?`<button class="btn sm secondary" data-action="whatsapp-reminder" data-kind="rent" data-recid="${r.id}">💬</button>`:''}
         <button class="btn sm secondary" data-action="edit-rent" data-id="${r.id}">Edit</button>
         <button class="btn sm danger" data-action="delete-rent" data-id="${r.id}">Delete</button>
       </td></tr>`;
@@ -1213,35 +1733,82 @@ function getOrCreatePrintArea(id){
   }
   return el;
 }
-function printRentReceipt(id){
-  const r = db.rentPayments.find(x=>x.id===id);
-  if(!r) return;
-  const t = tenantById(r.tenantId), u = unitById(r.unitId), p = u?propertyById(u.propertyId):null;
+/* ---------------------------------------------------------------------- */
+/* PROFESSIONAL RECEIPT LAYOUT (shared by all 5 receipt types)            */
+/* ---------------------------------------------------------------------- */
+function professionalReceiptHTML(opts){
   const s = db.settings;
-  getOrCreatePrintArea('printSlipArea').innerHTML = `
-    <div class="print-slip">
+  const lines = (opts.lineItems||[]).filter(li=>li.value!==undefined && li.value!==null && li.value!=='')
+    .map(li=>`<div class="slip-row"><span>${escapeHtml(li.label)}:</span><span>${li.value}</span></div>`).join('');
+  return `
+    <div class="print-slip receipt-pro">
+      ${s.receiptHeader?`<div class="slip-custom-header">${escapeHtml(s.receiptHeader)}</div>`:''}
       <div class="slip-head">
         <h2>${escapeHtml(s.ownerName)||'Rental Manager'}</h2>
-        <div>${escapeHtml(s.ownerAddress)||''}</div>
+        ${opts.propertyName?`<div>${escapeHtml(opts.propertyName)}${opts.propertyAddress?(' — '+escapeHtml(opts.propertyAddress)):''}</div>`:''}
         <div>${s.ownerPhone?('Phone: '+escapeHtml(s.ownerPhone)+' '):''}${s.ownerEmail?('Email: '+escapeHtml(s.ownerEmail)):''}</div>
+        <h3 style="margin:10px 0 0;">${escapeHtml(opts.title)}</h3>
       </div>
-      <div class="slip-row"><span>Receipt No:</span><span>${escapeHtml(r.receiptNumber)||r.id}</span></div>
-      <div class="slip-row"><span>Payment Date:</span><span>${formatDate(r.paymentDate)}</span></div>
-      <div class="slip-row"><span>Property / Unit:</span><span>${escapeHtml(p?p.name:'—')} / ${escapeHtml(u?u.unitNumber:'—')}</span></div>
+      <div class="slip-row"><span>Receipt No:</span><span>${escapeHtml(opts.receiptNo)}</span></div>
+      <div class="slip-row"><span>Receipt Date:</span><span>${formatDate(opts.receiptDate)}</span></div>
+      <div class="slip-row"><span>Tenant:</span><span>${escapeHtml(opts.tenantName)||'—'}</span></div>
+      <div class="slip-row"><span>Unit Number:</span><span>${escapeHtml(opts.unitNumber)||'—'}</span></div>
+      ${opts.billingMonth?`<div class="slip-row"><span>Billing Month:</span><span>${escapeHtml(opts.billingMonth)}</span></div>`:''}
       <div class="slip-body">
-        Received with thanks from <b>${escapeHtml(t?t.name:'—')}</b> a sum of <b>${formatCurrency(r.amountReceived)}</b> by <b>${escapeHtml(r.paymentMode)}</b>
-        towards rent for <b>${escapeHtml(r.rentMonth)} ${escapeHtml(r.rentYear)}</b>.<br><br>
-        Rent: ${formatCurrency(r.rentAmount)} · Maintenance: ${formatCurrency(r.maintenanceAmount)} · Water: ${formatCurrency(r.waterCharge)} · Parking: ${formatCurrency(r.parkingCharge)} · Other: ${formatCurrency(r.otherCharges)}<br>
-        Previous Due: ${formatCurrency(r.previousRentDue)} · Late Fee: ${formatCurrency(r.lateFee)} · Adjustment: ${formatCurrency(r.adjustment)}<br>
-        <b>Total Payable: ${formatCurrency(rentTotalPayable(r))}</b> · Balance Due: <b>${formatCurrency(rentBalanceDue(r))}</b> · Status: <b>${rentStatus(r)}</b>
+        ${lines}
+        <hr>
+        <div class="slip-row"><span><b>Total Payable</b></span><span><b>${formatCurrency(opts.totalPayable)}</b></span></div>
+        <div class="slip-row"><span>Amount Received</span><span>${formatCurrency(opts.amountReceived)}</span></div>
+        <div class="slip-row"><span><b>Balance Due</b></span><span><b>${formatCurrency(opts.balanceDue)}</b></span></div>
+        <div class="slip-row"><span>Payment Mode:</span><span>${escapeHtml(opts.paymentMode)||'—'}</span></div>
+        <div class="slip-row"><span>Transaction Reference:</span><span>${escapeHtml(opts.transactionRef)||'—'}</span></div>
+        ${opts.remarks?`<div class="slip-row"><span>Remarks:</span><span>${escapeHtml(opts.remarks)}</span></div>`:''}
       </div>
-      <div class="slip-sign">Authorised Signatory</div>
+      <div class="slip-sign">Authorised Signature<br>${escapeHtml(s.ownerSignatureName)||''}</div>
+      ${s.receiptFooter?`<div class="slip-custom-footer">${escapeHtml(s.receiptFooter)}</div>`:''}
     </div>`;
+}
+function printReceiptDocument(areaId, html){
+  getOrCreatePrintArea(areaId).innerHTML = html;
   document.body.classList.add('print-single-rx');
   setTimeout(()=>{
     window.print();
     setTimeout(()=>document.body.classList.remove('print-single-rx'), 300);
   }, 50);
+}
+function shareReceiptText(summary){
+  if(navigator.share){
+    navigator.share({text:summary}).catch(()=>{});
+  }else{
+    alert('Direct sharing is not supported on this browser. Use Print → Save as PDF to share the receipt, or copy this summary:\n\n'+summary);
+  }
+}
+function printRentReceipt(id){
+  const r = db.rentPayments.find(x=>x.id===id);
+  if(!r) return;
+  const t = tenantById(r.tenantId), u = unitById(r.unitId), p = u?propertyById(u.propertyId):null;
+  printReceiptDocument('printSlipArea', professionalReceiptHTML({
+    title:'RENT RECEIPT', receiptNo:r.receiptNumber||r.id, receiptDate:r.paymentDate,
+    propertyName:p?p.name:'', propertyAddress:p?p.address:'', tenantName:t?t.name:'', unitNumber:u?u.unitNumber:'',
+    billingMonth:r.rentMonth+' '+r.rentYear,
+    lineItems:[
+      {label:'Rent', value:formatCurrency(r.rentAmount)},
+      {label:'Maintenance', value:formatCurrency(r.maintenanceAmount)},
+      {label:'Water', value:formatCurrency(r.waterCharge)},
+      {label:'Parking', value:formatCurrency(r.parkingCharge)},
+      {label:'Other Charges', value:formatCurrency(r.otherCharges)},
+      {label:'Previous Due', value:formatCurrency(r.previousRentDue)},
+      {label:'Late Fee', value:formatCurrency(r.lateFee)},
+      {label:'Adjustment', value:formatCurrency(r.adjustment)}
+    ],
+    totalPayable:rentTotalPayable(r), amountReceived:r.amountReceived, balanceDue:rentBalanceDue(r),
+    paymentMode:r.paymentMode, transactionRef:r.transactionRef, remarks:r.remarks
+  }));
+}
+function shareRentReceipt(id){
+  const r = db.rentPayments.find(x=>x.id===id); if(!r) return;
+  const t = tenantById(r.tenantId);
+  shareReceiptText(`Rent Receipt ${r.receiptNumber||r.id} — ${t?t.name:''} — ${r.rentMonth} ${r.rentYear} — Received ${formatCurrency(r.amountReceived)}, Balance ${formatCurrency(rentBalanceDue(r))}`);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1265,6 +1832,7 @@ function renderElectricity(){
       <td><span class="badge ${status==='Paid'?'badge-green':status==='Partly Paid'?'badge-orange':'badge-red'}">${status}</span></td>
       <td class="actions-cell">
         <button class="btn sm secondary" data-action="print-electricity-bill" data-id="${b.id}">Print</button>
+        ${status!=='Paid'?`<button class="btn sm secondary" data-action="whatsapp-reminder" data-kind="electricity" data-recid="${b.id}">💬</button>`:''}
         <button class="btn sm secondary" data-action="edit-electricity" data-id="${b.id}">Edit</button>
         <button class="btn sm danger" data-action="delete-electricity" data-id="${b.id}">Delete</button>
       </td></tr>`;
@@ -1397,32 +1965,29 @@ function printElectricityBill(id){
   const b = db.electricityBills.find(x=>x.id===id);
   if(!b) return;
   const t = tenantById(b.tenantId), u = unitById(b.unitId), p = u?propertyById(u.propertyId):null;
-  const s = db.settings;
-  getOrCreatePrintArea('billPrintArea').innerHTML = `
-    <div class="print-slip">
-      <div class="slip-head">
-        <h2>${escapeHtml(s.ownerName)||'Rental Manager'}</h2>
-        <div>${escapeHtml(s.ownerAddress)||''}</div>
-      </div>
-      <div class="slip-row"><span>Electricity Bill No:</span><span>${escapeHtml(b.billNumber)||b.id}</span></div>
-      <div class="slip-row"><span>Billing Month:</span><span>${b.billingMonth} ${b.billingYear}</span></div>
-      <div class="slip-row"><span>Property / Unit:</span><span>${escapeHtml(p?p.name:'—')} / ${escapeHtml(u?u.unitNumber:'—')}</span></div>
-      <div class="slip-row"><span>Tenant:</span><span>${escapeHtml(t?t.name:'—')}</span></div>
-      <div class="slip-row"><span>Sub-meter No:</span><span>${escapeHtml(b.subMeterNumber)||'—'}</span></div>
-      <div class="slip-body">
-        Previous Reading: ${b.prevReading} (${formatDate(b.prevReadingDate)}) &nbsp; Current Reading: ${b.currReading} (${formatDate(b.currReadingDate)})<br>
-        Units Consumed: <b>${billUnitsConsumed(b)}</b> × Rate ₹${b.ratePerUnit}/unit = <b>${formatCurrency(billElectricityCharge(b))}</b><br>
-        Previous Outstanding: ${formatCurrency(b.previousOutstanding)} · Late Fee: ${formatCurrency(b.lateFee)} · Adjustment: ${formatCurrency(b.adjustment)}<br><br>
-        <b>Total Payable: ${formatCurrency(billTotalPayable(b))}</b><br>
-        Amount Paid: ${formatCurrency(b.amountPaid)} · <b>Balance Due: ${formatCurrency(billBalanceDue(b))}</b> · Status: <b>${billStatus(b)}</b>
-      </div>
-      <div class="slip-sign">Authorised Signatory</div>
-    </div>`;
-  document.body.classList.add('print-single-rx');
-  setTimeout(()=>{
-    window.print();
-    setTimeout(()=>document.body.classList.remove('print-single-rx'), 300);
-  }, 50);
+  printReceiptDocument('billPrintArea', professionalReceiptHTML({
+    title:'ELECTRICITY RECEIPT', receiptNo:b.billNumber||b.id, receiptDate:b.paymentDate||b.currReadingDate,
+    propertyName:p?p.name:'', propertyAddress:p?p.address:'', tenantName:t?t.name:'', unitNumber:u?u.unitNumber:'',
+    billingMonth:b.billingMonth+' '+b.billingYear,
+    lineItems:[
+      {label:'Sub-meter Number', value:escapeHtml(b.subMeterNumber)||'—'},
+      {label:'Previous Reading', value:b.prevReading+' ('+formatDate(b.prevReadingDate)+')'},
+      {label:'Current Reading', value:b.currReading+' ('+formatDate(b.currReadingDate)+')'},
+      {label:'Units Consumed', value:billUnitsConsumed(b)},
+      {label:'Rate Per Unit', value:formatCurrency(b.ratePerUnit)},
+      {label:'Electricity Charge', value:formatCurrency(billElectricityCharge(b))},
+      {label:'Previous Due', value:formatCurrency(b.previousOutstanding)},
+      {label:'Late Fee', value:formatCurrency(b.lateFee)},
+      {label:'Adjustment', value:formatCurrency(b.adjustment)}
+    ],
+    totalPayable:billTotalPayable(b), amountReceived:b.amountPaid, balanceDue:billBalanceDue(b),
+    paymentMode:b.paymentMode, transactionRef:'', remarks:b.remarks
+  }));
+}
+function shareElectricityBill(id){
+  const b = db.electricityBills.find(x=>x.id===id); if(!b) return;
+  const t = tenantById(b.tenantId);
+  shareReceiptText(`Electricity Bill ${b.billNumber||b.id} — ${t?t.name:''} — ${b.billingMonth} ${b.billingYear} — Total ${formatCurrency(billTotalPayable(b))}, Balance ${formatCurrency(billBalanceDue(b))}`);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1435,19 +2000,48 @@ function filteredCombinedBills(){
     return !q || [t&&t.name, c.id].join(' ').toLowerCase().includes(q);
   }).slice().sort((a,b)=>(a.createdAt||'')<(b.createdAt||'')?1:-1);
 }
+// Displayed status for a combined/monthly bill. Draft/Finalised/Cancelled
+// are explicit user-controlled states; Partly Paid/Paid/Overdue are derived
+// live from the amounts so they always reflect reality even if the record
+// was migrated from an older version.
+function combinedBillDisplayStatus(c){
+  if(c.status==='Cancelled') return 'Cancelled';
+  const totalPayable = combinedTotalPayable(c);
+  const bal = combinedBalanceDue(c);
+  if(totalPayable>0 && bal<=0) return 'Paid';
+  if((Number(c.amountReceived)||0)>0) return 'Partly Paid';
+  if(c.status==='Draft') return 'Draft';
+  const mIdx = MONTH_NAMES.indexOf(c.month);
+  if(mIdx>=0){
+    const billEndOfMonth = c.year+'-'+String(mIdx+1).padStart(2,'0')+'-28';
+    const d = daysBetween(billEndOfMonth, todayISO());
+    if(d!==null && d>10) return 'Overdue';
+  }
+  return 'Finalised';
+}
+function combinedBillStatusBadgeClass(status){
+  if(status==='Paid') return 'badge-green';
+  if(status==='Partly Paid') return 'badge-orange';
+  if(status==='Overdue') return 'badge-red';
+  if(status==='Draft') return 'badge-grey';
+  if(status==='Cancelled') return 'badge-grey';
+  return 'badge-blue';
+}
 function renderCombinedBills(){
   const list = filteredCombinedBills();
   const rows = list.map(c=>{
     const t = tenantById(c.tenantId), u = unitById(c.unitId);
-    const bal = combinedBalanceDue(c);
-    const status = bal<=0?'Paid':((Number(c.amountReceived)||0)>0?'Partly Paid':'Unpaid');
+    const status = combinedBillDisplayStatus(c);
     return `<tr>
-      <td>${escapeHtml(c.id)}</td><td>${escapeHtml(t?t.name:'—')}</td><td>${escapeHtml(u?u.unitNumber:'—')}</td>
+      <td>${escapeHtml(c.billNumber||c.id)}</td><td>${escapeHtml(t?t.name:'—')}</td><td>${escapeHtml(u?u.unitNumber:'—')}</td>
       <td>${c.month} ${c.year}</td><td>${formatCurrency(combinedTotalPayable(c))}</td><td>${formatCurrency(c.amountReceived)}</td>
-      <td><span class="badge ${status==='Paid'?'badge-green':status==='Partly Paid'?'badge-orange':'badge-red'}">${status}</span></td>
+      <td><span class="badge ${combinedBillStatusBadgeClass(status)}">${status}</span></td>
       <td class="actions-cell">
         <button class="btn sm secondary" data-action="print-combined-bill" data-id="${c.id}">Print</button>
-        <button class="btn sm secondary" data-action="edit-combined-bill" data-id="${c.id}">Edit</button>
+        ${status!=='Paid'&&status!=='Cancelled'?`<button class="btn sm secondary" data-action="whatsapp-reminder" data-kind="combined" data-recid="${c.id}">💬</button>`:''}
+        ${status==='Draft'?`<button class="btn sm secondary" data-action="finalise-combined-bill" data-id="${c.id}">Finalise</button>`:''}
+        <button class="btn sm secondary" data-action="edit-combined-bill" data-id="${c.id}">Record Payment</button>
+        ${status==='Draft'||status==='Finalised'?`<button class="btn sm danger" data-action="cancel-combined-bill" data-id="${c.id}">Cancel</button>`:''}
         <button class="btn sm danger" data-action="delete-combined-bill" data-id="${c.id}">Delete</button>
       </td></tr>`;
   }).join('');
@@ -1455,6 +2049,7 @@ function renderCombinedBills(){
     <div class="toolbar no-print">
       <input type="text" id="searchBox" placeholder="Search by tenant..." value="${escapeHtml(state.search)}">
       <div class="spacer"></div>
+      <button class="btn secondary" data-action="goto" data-view="billingCentre">🧮 Monthly Billing Centre</button>
       <button class="btn" data-action="goto" data-view="combinedBillForm">➕ Generate Combined Bill</button>
     </div>
     <div class="table-wrap"><table><thead><tr><th>ID</th><th>Tenant</th><th>Unit</th><th>Month</th><th>Payable</th><th>Received</th><th>Status</th><th>Actions</th></tr></thead>
@@ -1531,9 +2126,10 @@ function renderCombinedBillForm(id){
       if(!confirm('The payment allocation total ('+formatCurrency(allocSum)+') does not match Amount Received ('+formatCurrency(vals.amountReceived)+').\n\nSave anyway?')) return;
     }
     if(existing){
+      if(combinedBillDisplayStatus(existing)==='Paid' && !confirm('This bill is already marked Paid. Editing a paid bill is unusual — continue anyway?')) return;
       Object.assign(existing, vals, {tenantId, unitId, allocation});
     }else{
-      db.combinedBills.push(Object.assign({id:nextId('CMB','combinedBill'), tenantId, unitId, allocation, createdAt:todayISO()}, vals));
+      db.combinedBills.push(Object.assign({id:nextId('CMB','combinedBill'), billNumber:nextCombinedBillNumber(vals.year), tenantId, unitId, allocation, status:'Finalised', createdAt:todayISO()}, vals));
     }
     saveDB();
     goto('combinedBills');
@@ -1543,32 +2139,215 @@ function printCombinedBill(id){
   const c = db.combinedBills.find(x=>x.id===id);
   if(!c) return;
   const t = tenantById(c.tenantId), u = unitById(c.unitId), p = u?propertyById(u.propertyId):null;
-  const s = db.settings;
-  getOrCreatePrintArea('combinedPrintArea').innerHTML = `
-    <div class="print-slip">
-      <div class="slip-head">
-        <h2>${escapeHtml(s.ownerName)||'Rental Manager'}</h2>
-        <div>${escapeHtml(s.ownerAddress)||''}</div>
+  printReceiptDocument('combinedPrintArea', professionalReceiptHTML({
+    title:'COMBINED MONTHLY RECEIPT', receiptNo:c.billNumber||c.id, receiptDate:c.paymentDate||c.createdAt,
+    propertyName:p?p.name:'', propertyAddress:p?p.address:'', tenantName:t?t.name:'', unitNumber:u?u.unitNumber:'',
+    billingMonth:c.month+' '+c.year,
+    lineItems:[
+      {label:'Rent', value:formatCurrency(c.rentAmount)},
+      {label:'Maintenance', value:formatCurrency(c.maintenance)},
+      {label:'Electricity', value:formatCurrency(c.electricity)},
+      {label:'Water', value:formatCurrency(c.water)},
+      {label:'Parking', value:formatCurrency(c.parking)},
+      {label:'Other Charges', value:formatCurrency(c.other)},
+      {label:'Previous Rent Due', value:formatCurrency(c.previousRentDue)},
+      {label:'Previous Electricity Due', value:formatCurrency(c.previousElectricityDue)},
+      {label:'Late Fee', value:formatCurrency(c.lateFee)},
+      {label:'Adjustment', value:formatCurrency(c.adjustment)}
+    ],
+    totalPayable:combinedTotalPayable(c), amountReceived:c.amountReceived, balanceDue:combinedBalanceDue(c),
+    paymentMode:c.paymentMode, transactionRef:'', remarks:c.remarks
+  }));
+}
+function shareCombinedBill(id){
+  const c = db.combinedBills.find(x=>x.id===id); if(!c) return;
+  const t = tenantById(c.tenantId);
+  shareReceiptText(`Combined Bill ${c.billNumber||c.id} — ${t?t.name:''} — ${c.month} ${c.year} — Total ${formatCurrency(combinedTotalPayable(c))}, Balance ${formatCurrency(combinedBalanceDue(c))}`);
+}
+
+/* ---------------------------------------------------------------------- */
+/* MONTHLY BILLING CENTRE (batch draft generation for combined bills)    */
+/* ---------------------------------------------------------------------- */
+state.billingCentre = state.billingCentre || {propertyId:'all', month:MONTH_NAMES[new Date().getMonth()], year:new Date().getFullYear(), preview:null};
+function occupiedUnitsForBillingCentre(propertyId){
+  return db.units.filter(u=>u.status==='Occupied' && (propertyId==='all' || u.propertyId===propertyId));
+}
+// Computes (without saving) what a combined bill for this unit/month would
+// look like, using the unit's own recurring charges plus any already-saved
+// electricity bill and outstanding previous dues for its current tenant.
+function draftBillForUnit(unit, month, year){
+  const tenant = currentTenantForUnit(unit.id);
+  if(!tenant) return null;
+  const prop = propertyById(unit.propertyId);
+  const elecBill = db.electricityBills.find(b=>b.unitId===unit.id && b.billingMonth===month && String(b.billingYear)===String(year));
+  const prevRentOutstanding = db.rentPayments.filter(r=>r.unitId===unit.id && !(r.rentMonth===month && String(r.rentYear)===String(year))).reduce((s,r)=>s+Math.max(0,rentBalanceDue(r)),0);
+  const lastElec = lastElectricityBillForUnit(unit.id);
+  const prevElecOutstanding = (lastElec && !(lastElec.billingMonth===month && String(lastElec.billingYear)===String(year))) ? Math.max(0,billBalanceDue(lastElec)) : 0;
+  const lateFee = db.settings.lateFeeEnabled ? (Number(db.settings.defaultLateFee)||0) : 0;
+  const draft = {
+    tenantId:tenant.id, unitId:unit.id, propertyId:unit.propertyId,
+    tenantName:tenant.name, unitNumber:unit.unitNumber, propertyName:prop?prop.name:'',
+    month, year,
+    rentAmount:Number(unit.monthlyRent)||0, maintenance:Number(unit.maintenanceCharge)||0,
+    electricity: elecBill ? billElectricityCharge(elecBill) : 0,
+    water:Number(unit.waterCharge)||0, parking:Number(unit.parkingCharge)||0, other:Number(unit.otherMonthlyCharge)||0,
+    previousRentDue:prevRentOutstanding, previousElectricityDue:prevElecOutstanding,
+    lateFee, adjustment:0, amountReceived:0, paymentMode:'Cash', remarks: elecBill?'':'Electricity bill not yet generated for this month — add manually if needed.'
+  };
+  draft.totalPayable = combinedTotalPayable(draft);
+  draft.existing = db.combinedBills.find(c=>c.unitId===unit.id && c.month===month && String(c.year)===String(year)) || null;
+  return draft;
+}
+function renderBillingCentre(){
+  const bc = state.billingCentre;
+  const propOpts = ['<option value="all">All Properties</option>'].concat(db.properties.map(p=>`<option value="${p.id}" ${bc.propertyId===p.id?'selected':''}>${escapeHtml(p.name)}</option>`)).join('');
+  const monthOpts = MONTH_NAMES.map(m=>`<option value="${m}" ${bc.month===m?'selected':''}>${m}</option>`).join('');
+  let previewHtml = '';
+  if(bc.preview){
+    if(!bc.preview.length){
+      previewHtml = '<div class="empty-note">No occupied units found for this selection.</div>';
+    }else{
+      const rows = bc.preview.map((d,i)=>`<tr>
+        <td>${escapeHtml(d.propertyName)}</td><td>${escapeHtml(d.unitNumber)}</td><td>${escapeHtml(d.tenantName)}</td>
+        <td>${formatCurrency(d.rentAmount)}</td><td>${formatCurrency(d.electricity)}</td>
+        <td>${formatCurrency(d.previousRentDue+d.previousElectricityDue)}</td><td>${formatCurrency(d.totalPayable)}</td>
+        <td>${d.existing?`<span class="badge badge-orange">Bill exists (${combinedBillDisplayStatus(d.existing)})</span>`:'<span class="badge badge-green">Will create Draft</span>'}</td>
+        <td class="actions-cell">${d.existing?`<button class="btn sm secondary" data-action="goto" data-view="combinedBillForm" data-id="${d.existing.id}">View Existing</button>`:''}</td>
+      </tr>`).join('');
+      previewHtml = `
+        <div class="table-wrap"><table><thead><tr><th>Property</th><th>Unit</th><th>Tenant</th><th>Rent</th><th>Electricity</th><th>Previous Due</th><th>Total Payable</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+        <div class="form-actions">
+          <button class="btn grey" id="bcCancelPreview">Cancel Preview</button>
+          <button class="btn" id="bcConfirmSave">✅ Confirm &amp; Save New Drafts</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);">Units that already have a bill for this month are skipped automatically — open "View Existing" to update or record payment instead. This never overwrites an existing bill.</p>
+      `;
+    }
+  }
+  return moreSubtabsHTML('billingCentre') + `
+    <div class="form-section">
+      <h3>🧮 Generate Monthly Bills</h3>
+      <div class="form-grid">
+        <div class="form-field"><label>Property</label><select id="bcProperty">${propOpts}</select></div>
+        <div class="form-field"><label>Billing Month</label><select id="bcMonth">${monthOpts}</select></div>
+        <div class="form-field"><label>Billing Year</label><input id="bcYear" type="number" value="${bc.year}"></div>
       </div>
-      <div class="slip-row"><span>Combined Bill No:</span><span>${escapeHtml(c.id)}</span></div>
-      <div class="slip-row"><span>Month:</span><span>${c.month} ${c.year}</span></div>
-      <div class="slip-row"><span>Property / Unit:</span><span>${escapeHtml(p?p.name:'—')} / ${escapeHtml(u?u.unitNumber:'—')}</span></div>
-      <div class="slip-row"><span>Tenant:</span><span>${escapeHtml(t?t.name:'—')}</span></div>
-      <div class="slip-body">
-        Rent: ${formatCurrency(c.rentAmount)}<br>Maintenance: ${formatCurrency(c.maintenance)}<br>Electricity: ${formatCurrency(c.electricity)}<br>
-        Water: ${formatCurrency(c.water)}<br>Parking: ${formatCurrency(c.parking)}<br>Other: ${formatCurrency(c.other)}<br>
-        Previous Rent Due: ${formatCurrency(c.previousRentDue)}<br>Previous Electricity Due: ${formatCurrency(c.previousElectricityDue)}<br>
-        Late Fee: ${formatCurrency(c.lateFee)}<br>Adjustment: ${formatCurrency(c.adjustment)}<br><br>
-        <b>Total Payable: ${formatCurrency(combinedTotalPayable(c))}</b><br>
-        Amount Received: ${formatCurrency(c.amountReceived)} · <b>Balance Due: ${formatCurrency(combinedBalanceDue(c))}</b>
-      </div>
-      <div class="slip-sign">Authorised Signatory</div>
-    </div>`;
-  document.body.classList.add('print-single-rx');
-  setTimeout(()=>{
-    window.print();
-    setTimeout(()=>document.body.classList.remove('print-single-rx'), 300);
-  }, 50);
+      <div class="form-actions"><button class="btn" id="bcPreviewBtn">👁️ Preview</button></div>
+    </div>
+    ${previewHtml}
+  `;
+}
+function attachBillingCentreHandlers(){
+  const bc = state.billingCentre;
+  const propSel = document.getElementById('bcProperty'), monthSel = document.getElementById('bcMonth'), yearInput = document.getElementById('bcYear');
+  const previewBtn = document.getElementById('bcPreviewBtn');
+  if(previewBtn) previewBtn.addEventListener('click', ()=>{
+    bc.propertyId = propSel.value; bc.month = monthSel.value; bc.year = Number(yearInput.value)||bc.year;
+    const units = occupiedUnitsForBillingCentre(bc.propertyId);
+    bc.preview = units.map(u=>draftBillForUnit(u, bc.month, bc.year)).filter(Boolean);
+    render();
+  });
+  const cancelBtn = document.getElementById('bcCancelPreview');
+  if(cancelBtn) cancelBtn.addEventListener('click', ()=>{ bc.preview = null; render(); });
+  const confirmBtn = document.getElementById('bcConfirmSave');
+  if(confirmBtn) confirmBtn.addEventListener('click', ()=>{
+    const toCreate = bc.preview.filter(d=>!d.existing);
+    if(!toCreate.length){ alert('Nothing to save — every selected unit already has a bill for this month.'); return; }
+    if(!confirm(`Create ${toCreate.length} new draft bill(s) for ${bc.month} ${bc.year}? You can review and Finalise each one afterwards.`)) return;
+    toCreate.forEach(d=>{
+      db.combinedBills.push({
+        id:nextId('CMB','combinedBill'), billNumber:nextCombinedBillNumber(d.year), tenantId:d.tenantId, unitId:d.unitId, status:'Draft', createdAt:todayISO(),
+        month:d.month, year:d.year, rentAmount:d.rentAmount, maintenance:d.maintenance, electricity:d.electricity,
+        water:d.water, parking:d.parking, other:d.other, previousRentDue:d.previousRentDue, previousElectricityDue:d.previousElectricityDue,
+        lateFee:d.lateFee, adjustment:d.adjustment, amountReceived:0, paymentMode:'Cash', remarks:d.remarks
+      });
+    });
+    saveDB();
+    bc.preview = null;
+    alert(toCreate.length+' draft bill(s) created. Open Combined Bills to review, Finalise and print them.');
+    goto('combinedBills');
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* SECURITY DEPOSIT / DEPOSIT REFUND RECEIPTS                            */
+/* ---------------------------------------------------------------------- */
+function printDepositReceipt(id){
+  const d = db.deposits.find(x=>x.id===id);
+  if(!d) return;
+  const t = tenantById(d.tenantId), u = unitById(d.unitId), p = u?propertyById(u.propertyId):null;
+  printReceiptDocument('depositPrintArea', professionalReceiptHTML({
+    title:'SECURITY DEPOSIT RECEIPT', receiptNo:d.receiptNumber||d.id, receiptDate:d.dateReceived,
+    propertyName:p?p.name:'', propertyAddress:p?p.address:'', tenantName:t?t.name:'', unitNumber:u?u.unitNumber:'',
+    lineItems:[
+      {label:'Deposit Amount', value:formatCurrency(d.depositAmount)},
+      {label:'Refundable Amount', value:formatCurrency(d.refundableAmount)},
+      {label:'Refund Status', value:escapeHtml(d.refundStatus)||'Held'}
+    ],
+    totalPayable:d.depositAmount, amountReceived:d.depositAmount, balanceDue:0,
+    paymentMode:d.paymentMode, transactionRef:'', remarks:d.remarks
+  }));
+}
+function printDepositRefundReceipt(id){
+  const d = db.deposits.find(x=>x.id===id);
+  if(!d) return;
+  const t = tenantById(d.tenantId), u = unitById(d.unitId), p = u?propertyById(u.propertyId):null;
+  printReceiptDocument('depositRefundPrintArea', professionalReceiptHTML({
+    title:'SECURITY DEPOSIT REFUND RECEIPT', receiptNo:(d.receiptNumber||d.id)+'-REFUND', receiptDate:d.refundDate||todayISO(),
+    propertyName:p?p.name:'', propertyAddress:p?p.address:'', tenantName:t?t.name:'', unitNumber:u?u.unitNumber:'',
+    lineItems:[
+      {label:'Original Deposit', value:formatCurrency(d.depositAmount)},
+      {label:'Adjustment Against Dues', value:formatCurrency(d.adjustmentAgainstDues)},
+      {label:'Damage Deduction', value:formatCurrency(d.damageDeduction)},
+      {label:'Other Deduction', value:formatCurrency(d.otherDeduction)}
+    ],
+    totalPayable:d.refundAmount, amountReceived:d.refundAmount, balanceDue:0,
+    paymentMode:d.paymentMode, transactionRef:'', remarks:d.remarks
+  }));
+}
+
+/* ---------------------------------------------------------------------- */
+/* RECEIPT HISTORY (aggregated view across all 5 receipt types)          */
+/* ---------------------------------------------------------------------- */
+function allReceiptsList(){
+  const out = [];
+  db.rentPayments.forEach(r=>{
+    const t = tenantById(r.tenantId), u = unitById(r.unitId);
+    out.push({date:r.paymentDate, type:'Rent', no:r.receiptNumber||r.id, tenant:t?t.name:'—', unit:u?u.unitNumber:'—', amount:r.amountReceived, printAction:'print-rent-receipt', shareAction:'share-rent-receipt', id:r.id});
+  });
+  db.electricityBills.forEach(b=>{
+    const t = tenantById(b.tenantId), u = unitById(b.unitId);
+    out.push({date:b.paymentDate||b.currReadingDate, type:'Electricity', no:b.billNumber||b.id, tenant:t?t.name:'—', unit:u?u.unitNumber:'—', amount:b.amountPaid, printAction:'print-electricity-bill', shareAction:'share-electricity-bill', id:b.id});
+  });
+  db.combinedBills.forEach(c=>{
+    const t = tenantById(c.tenantId), u = unitById(c.unitId);
+    out.push({date:c.paymentDate||c.createdAt, type:'Combined Bill', no:c.billNumber||c.id, tenant:t?t.name:'—', unit:u?u.unitNumber:'—', amount:c.amountReceived, printAction:'print-combined-bill', shareAction:'share-combined-bill', id:c.id});
+  });
+  db.deposits.forEach(d=>{
+    const t = tenantById(d.tenantId), u = unitById(d.unitId);
+    out.push({date:d.dateReceived, type:'Security Deposit', no:d.receiptNumber||d.id, tenant:t?t.name:'—', unit:u?u.unitNumber:'—', amount:d.depositAmount, printAction:'print-deposit-receipt', shareAction:'', id:d.id});
+    if(d.refundStatus==='Refunded'){
+      out.push({date:d.refundDate||d.dateReceived, type:'Deposit Refund', no:(d.receiptNumber||d.id)+'-REFUND', tenant:t?t.name:'—', unit:u?u.unitNumber:'—', amount:d.refundAmount, printAction:'print-deposit-refund-receipt', shareAction:'', id:d.id});
+    }
+  });
+  return out.sort((a,b)=>(a.date||'')<(b.date||'')?1:-1);
+}
+function renderReceiptHistory(){
+  const q = (state.search||'').toLowerCase();
+  const list = allReceiptsList().filter(r=>!q || [r.tenant,r.no,r.type].join(' ').toLowerCase().includes(q));
+  const rows = list.map(r=>`<tr>
+    <td>${formatDate(r.date)}</td><td>${escapeHtml(r.type)}</td><td>${escapeHtml(r.no)}</td><td>${escapeHtml(r.tenant)}</td><td>${escapeHtml(r.unit)}</td><td>${formatCurrency(r.amount)}</td>
+    <td class="actions-cell">
+      <button class="btn sm secondary" data-action="${r.printAction}" data-id="${r.id}">Reprint</button>
+      ${r.shareAction?`<button class="btn sm secondary" data-action="${r.shareAction}" data-id="${r.id}">Share</button>`:''}
+    </td></tr>`).join('');
+  return moreSubtabsHTML('receiptHistory') + `
+    <div class="toolbar no-print">
+      <input type="text" id="searchBox" placeholder="Search receipt history..." value="${escapeHtml(state.search)}">
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Receipt/Bill No.</th><th>Tenant</th><th>Unit</th><th>Amount</th><th>Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7" class="empty-note">No receipts generated yet.</td></tr>'}</tbody></table></div>`;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1595,6 +2374,9 @@ function renderDeposits(){
       <td>${formatCurrency(d.depositAmount)}</td><td>${formatDate(d.dateReceived)}</td>
       <td><span class="badge ${d.refundStatus==='Refunded'?'badge-green':d.refundStatus==='Pending Refund'?'badge-orange':'badge-grey'}">${escapeHtml(d.refundStatus)||'Held'}</span></td>
       <td class="actions-cell">
+        <button class="btn sm secondary" data-action="print-deposit-receipt" data-id="${d.id}">Print</button>
+        ${d.refundStatus==='Refunded'?`<button class="btn sm secondary" data-action="print-deposit-refund-receipt" data-id="${d.id}">Refund Receipt</button>`:''}
+        ${d.refundStatus==='Pending Refund'?`<button class="btn sm secondary" data-action="whatsapp-reminder" data-kind="deposit" data-recid="${d.id}">💬</button>`:''}
         <button class="btn sm secondary" data-action="edit-deposit" data-id="${d.id}">Edit</button>
         <button class="btn sm danger" data-action="delete-deposit" data-id="${d.id}">Delete</button>
       </td></tr>`;
@@ -1792,6 +2574,7 @@ function renderAgreements(){
       <td>${formatDate(a.startDate)}</td><td>${formatDate(a.endDate)}</td>
       <td><span class="badge ${a.renewalStatus==='Active'?'badge-green':a.renewalStatus==='Expired'?'badge-red':'badge-blue'}">${escapeHtml(a.renewalStatus)||'Active'}</span></td>
       <td class="actions-cell">
+        ${expiring?`<button class="btn sm secondary" data-action="whatsapp-reminder" data-kind="agreement" data-recid="${a.id}">💬</button>`:''}
         <button class="btn sm secondary" data-action="edit-agreement" data-id="${a.id}">Edit</button>
         <button class="btn sm danger" data-action="delete-agreement" data-id="${a.id}">Delete</button>
       </td></tr>`;
@@ -1902,13 +2685,14 @@ function deleteAttachment(kind, id, attId){
 /* ---------------------------------------------------------------------- */
 /* NOTIFICATION CENTRE                                                    */
 /* ---------------------------------------------------------------------- */
+// Priority tiers (v1.4.0): Urgent > Important > Upcoming > Information.
 function priorityFromDays(d){
-  if(d===null) return 'Low';
+  if(d===null) return 'Information';
   if(d<0) return 'Urgent';
   if(d<=7) return 'Urgent';
-  if(d<=30) return 'High';
-  if(d<=60) return 'Medium';
-  return 'Low';
+  if(d<=30) return 'Important';
+  if(d<=60) return 'Upcoming';
+  return 'Information';
 }
 function activeTenants(){ return db.tenants.filter(t=>t.status==='Active'||t.status==='Notice Given'); }
 function computeNotifications(){
@@ -1929,7 +2713,7 @@ function computeNotifications(){
         list.push({id:'rentoverdue-'+t.id+'-'+thisMonth, title:`Rent overdue: ${t.name} (Unit ${unit.unitNumber})`, module:'Rent Collection', date:dueDateThisMonth, priority:'Urgent', linkView:'tenantProfile', linkId:t.id});
       }
     }else if(rentBalanceDue(rec)>0){
-      list.push({id:'rentpartial-'+rec.id, title:`Partial rent payment balance: ${t.name} (${formatCurrency(rentBalanceDue(rec))})`, module:'Rent Collection', date:rec.paymentDate, priority:'High', linkView:'rent', linkId:null});
+      list.push({id:'rentpartial-'+rec.id, title:`Partial rent payment balance: ${t.name} (${formatCurrency(rentBalanceDue(rec))})`, module:'Rent Collection', date:rec.paymentDate, priority:'Important', linkView:'rent', linkId:null});
     }
   });
 
@@ -1939,15 +2723,15 @@ function computeNotifications(){
     if(!unit) return;
     const lastBill = lastElectricityBillForUnit(unit.id);
     if(!lastBill){
-      list.push({id:'meterdue-'+unit.id, title:`Meter reading due: ${unit.unitNumber} (no bill generated yet)`, module:'Electricity', date:today, priority:'Medium', linkView:'electricityForm', linkId:null});
+      list.push({id:'meterdue-'+unit.id, title:`Meter reading due: ${unit.unitNumber} (no bill generated yet)`, module:'Electricity', date:today, priority:'Upcoming', linkView:'electricityForm', linkId:null});
     }else{
       const daysSince = daysBetween(lastBill.currReadingDate, today);
       if(daysSince!==null && daysSince>35){
-        list.push({id:'meterdue-'+lastBill.id, title:`Meter reading due: ${unit.unitNumber} (last reading ${formatDate(lastBill.currReadingDate)})`, module:'Electricity', date:lastBill.currReadingDate, priority:'Medium', linkView:'electricity', linkId:null});
+        list.push({id:'meterdue-'+lastBill.id, title:`Meter reading due: ${unit.unitNumber} (last reading ${formatDate(lastBill.currReadingDate)})`, module:'Electricity', date:lastBill.currReadingDate, priority:'Upcoming', linkView:'electricity', linkId:null});
       }
       const bal = billBalanceDue(lastBill);
       if(bal>0){
-        list.push({id:'elecoverdue-'+lastBill.id, title:`Electricity ${billStatus(lastBill)==='Partly Paid'?'partial payment':'overdue'}: ${t.name} (${formatCurrency(bal)})`, module:'Electricity', date:lastBill.currReadingDate, priority: billStatus(lastBill)==='Unpaid'?'Urgent':'High', linkView:'electricity', linkId:null});
+        list.push({id:'elecoverdue-'+lastBill.id, title:`Electricity ${billStatus(lastBill)==='Partly Paid'?'partial payment':'overdue'}: ${t.name} (${formatCurrency(bal)})`, module:'Electricity', date:lastBill.currReadingDate, priority: billStatus(lastBill)==='Unpaid'?'Urgent':'Important', linkView:'electricity', linkId:null});
       }
     }
   });
@@ -1973,7 +2757,7 @@ function computeNotifications(){
   db.units.forEach(u=>{
     if(u.status==='Vacant'){
       const p = propertyById(u.propertyId);
-      list.push({id:'vacant-'+u.id, title:`Vacant unit: ${u.unitNumber} (${p?p.name:''})`, module:'Units', date:today, priority:'Low', linkView:'unitProfile', linkId:u.id});
+      list.push({id:'vacant-'+u.id, title:`Vacant unit: ${u.unitNumber} (${p?p.name:''})`, module:'Units', date:today, priority:'Information', linkView:'unitProfile', linkId:u.id});
     }
   });
 
@@ -1981,14 +2765,15 @@ function computeNotifications(){
   db.deposits.forEach(d=>{
     if(d.refundStatus==='Pending Refund'){
       const t = tenantById(d.tenantId);
-      list.push({id:'deprefund-'+d.id, title:`Security deposit refund pending: ${t?t.name:d.id}`, module:'Deposits', date:d.dateReceived, priority:'Medium', linkView:'deposits', linkId:null});
+      list.push({id:'deprefund-'+d.id, title:`Security deposit refund pending: ${t?t.name:d.id}`, module:'Deposits', date:d.dateReceived, priority:'Upcoming', linkView:'deposits', linkId:null});
     }
   });
 
   // Maintenance complaints pending
+  const complaintPriorityMap = {Urgent:'Urgent', High:'Important', Medium:'Upcoming', Low:'Information'};
   db.complaints.forEach(c=>{
     if(c.status==='Open'||c.status==='In Progress'){
-      list.push({id:'complaint-'+c.id, title:`Maintenance complaint pending: ${c.complaintType||'Complaint'} (${escapeHtml(c.priority||'Low')})`, module:'Maintenance', date:c.complaintDate, priority: c.priority==='Urgent'?'Urgent':(c.priority||'Medium'), linkView:'maintenance', linkId:null});
+      list.push({id:'complaint-'+c.id, title:`Maintenance complaint pending: ${c.complaintType||'Complaint'} (${escapeHtml(c.priority||'Low')})`, module:'Maintenance', date:c.complaintDate, priority: complaintPriorityMap[c.priority]||'Upcoming', linkView:'maintenance', linkId:null});
     }
   });
 
@@ -1996,13 +2781,16 @@ function computeNotifications(){
   db.units.filter(u=>u.status==='Occupied').forEach(u=>{
     const has = db.combinedBills.some(c=>c.unitId===u.id && c.month===MONTH_NAMES[new Date().getMonth()] && String(c.year)===String(new Date().getFullYear()));
     if(!has){
-      list.push({id:'nobill-'+u.id, title:`Monthly combined bill not generated: ${u.unitNumber}`, module:'Combined Bills', date:today, priority:'Low', linkView:'combinedBillForm', linkId:null});
+      list.push({id:'nobill-'+u.id, title:`Monthly combined bill not generated: ${u.unitNumber}`, module:'Combined Bills', date:today, priority:'Information', linkView:'combinedBillForm', linkId:null});
     }
   });
 
   const deleted = new Set(db.notificationState.deletedIds||[]);
   const read = new Set(db.notificationState.readIds||[]);
-  return list.filter(n=>!deleted.has(n.id)).map(n=>Object.assign(n, {read:read.has(n.id)}))
+  const snoozed = db.notificationState.snoozedUntil||{};
+  return list.filter(n=>!deleted.has(n.id))
+    .map(n=>Object.assign(n, {read:read.has(n.id), snoozedUntil:snoozed[n.id]||null}))
+    .filter(n=>!n.snoozedUntil || n.snoozedUntil<=today)
     .sort((a,b)=>(a.date||'')<(b.date||'')?-1:1);
 }
 function unreadNotificationsCount(){ return computeNotifications().filter(n=>!n.read).length; }
@@ -2019,6 +2807,13 @@ function deleteNotification(id){
   if(!db.notificationState.deletedIds.includes(id)) db.notificationState.deletedIds.push(id);
   saveDB(); render();
 }
+function snoozeNotification(id, days){
+  db.notificationState.snoozedUntil = db.notificationState.snoozedUntil||{};
+  const until = new Date();
+  until.setDate(until.getDate()+(Number(days)||1));
+  db.notificationState.snoozedUntil[id] = until.toISOString().slice(0,10);
+  saveDB(); render();
+}
 function openNotificationLink(view, id){ goto(view, id||null); }
 function updateNotificationBadge(){
   const badge = document.getElementById('notifBadge');
@@ -2027,22 +2822,29 @@ function updateNotificationBadge(){
   if(n>0){ badge.textContent = n>99?'99+':n; badge.style.display='flex'; }
   else{ badge.style.display='none'; }
 }
-const NOTIFICATION_FILTERS = ['all','Unread','Urgent','High','Medium','Low'];
+function notificationBadgeClass(priority){
+  if(priority==='Urgent') return 'badge-red';
+  if(priority==='Important') return 'badge-orange';
+  if(priority==='Upcoming') return 'badge-blue';
+  return 'badge-grey';
+}
+const NOTIFICATION_FILTERS = ['all','Unread','Urgent','Important','Upcoming','Information'];
 function renderNotifications(){
   let list = computeNotifications();
   const filter = state.notificationFilter||'all';
   if(filter==='Unread') list = list.filter(n=>!n.read);
   else if(filter!=='all') list = list.filter(n=>n.priority===filter);
-  const filterBar = `<div class="subtabs no-print" style="margin-bottom:14px;">${NOTIFICATION_FILTERS.map(f=>`<button data-action="filter-notifications" data-filter="${f}" class="${filter===f?'active':''}">${f==='all'?'All':f}</button>`).join('')}</div>`;
+  const filterBar = `<div class="subtabs no-print" style="margin-bottom:14px;">${NOTIFICATION_FILTERS.map(f=>`<button data-action="filter-notifications" data-filter="${f}" class="${filter===f?'active':''}">${f==='all'?'View All':f}</button>`).join('')}</div>`;
   const rows = list.map(n=>`
     <div class="notification-card ${n.read?'':'unread'} priority-${n.priority}">
       <div style="flex:1;min-width:0;cursor:pointer;" data-action="open-notification" data-linkview="${n.linkView}" data-linkid="${n.linkId||''}">
         <div style="font-weight:700;">${escapeHtml(n.title)} ${!n.read?'<span class=\"badge badge-blue\" style=\"margin-left:6px;\">New</span>':''}</div>
-        <div style="font-size:12.5px;color:var(--muted);">${escapeHtml(n.module)} · ${formatDate(n.date)} · <span class="badge ${n.priority==='Urgent'?'badge-red':n.priority==='High'?'badge-orange':n.priority==='Medium'?'badge-blue':'badge-grey'}">${n.priority}</span></div>
+        <div style="font-size:12.5px;color:var(--muted);">${escapeHtml(n.module)} · ${formatDate(n.date)} · <span class="badge ${notificationBadgeClass(n.priority)}">${n.priority}</span></div>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         ${!n.read?`<button class="btn sm secondary" data-action="mark-notification-read" data-nid="${n.id}">Mark Read</button>`:''}
-        <button class="btn sm danger" data-action="delete-notification" data-nid="${n.id}">Delete</button>
+        <button class="btn sm secondary" data-action="snooze-notification" data-nid="${n.id}">Snooze</button>
+        <button class="btn sm danger" data-action="delete-notification" data-nid="${n.id}">Dismiss</button>
       </div>
     </div>`).join('') || '<div class="empty-note">No notifications right now. You will be notified about rent/electricity overdue, agreement expiry, vacant units, pending deposit refunds, maintenance complaints and more.</div>';
   return moreSubtabsHTML('notifications') + `
@@ -2254,26 +3056,209 @@ function attachReportHandlers(){
 }
 
 /* ---------------------------------------------------------------------- */
+/* MONTHLY PROFIT & LOSS REPORT                                           */
+/* ---------------------------------------------------------------------- */
+function inRangeDate(d, from, to){
+  if(!d) return !from && !to;
+  if(from && d<from) return false;
+  if(to && d>to) return false;
+  return true;
+}
+// Pro-rata split of a rent receipt's amount received across its charge
+// categories, so partial payments are attributed fairly across Rent /
+// Maintenance / Water / Parking / Other for P&L purposes. Previous dues are
+// intentionally excluded from this-period income.
+function rentIncomeBreakdown(r){
+  const componentsSum = (Number(r.rentAmount)||0)+(Number(r.maintenanceAmount)||0)+(Number(r.waterCharge)||0)+(Number(r.parkingCharge)||0)+(Number(r.otherCharges)||0);
+  const received = Number(r.amountReceived)||0;
+  const factor = componentsSum>0 ? Math.min(1, received/componentsSum) : 0;
+  return {
+    rent:(Number(r.rentAmount)||0)*factor, maintenance:(Number(r.maintenanceAmount)||0)*factor,
+    water:(Number(r.waterCharge)||0)*factor, parking:(Number(r.parkingCharge)||0)*factor, other:(Number(r.otherCharges)||0)*factor
+  };
+}
+function computeProfitLoss(propertyId, fromDate, toDate){
+  const rentRecs = db.rentPayments.filter(r=>{
+    const u = unitById(r.unitId);
+    if(propertyId!=='all' && (!u || u.propertyId!==propertyId)) return false;
+    return inRangeDate(r.paymentDate, fromDate, toDate);
+  });
+  const elecRecs = db.electricityBills.filter(b=>{
+    const u = unitById(b.unitId);
+    if(propertyId!=='all' && (!u || u.propertyId!==propertyId)) return false;
+    return inRangeDate(b.paymentDate||b.currReadingDate, fromDate, toDate);
+  });
+  const expRecs = db.expenses.filter(e=>{
+    if(propertyId!=='all' && e.propertyId!==propertyId) return false;
+    return inRangeDate(e.date, fromDate, toDate);
+  });
+  let rent=0, maintenance=0, water=0, parking=0, otherIncome=0, electricity=0;
+  rentRecs.forEach(r=>{
+    const b = rentIncomeBreakdown(r);
+    rent+=b.rent; maintenance+=b.maintenance; water+=b.water; parking+=b.parking; otherIncome+=b.other;
+    if(rentStatus(r)==='Paid') otherIncome += Number(r.lateFee)||0;
+  });
+  elecRecs.forEach(b=>{ electricity += Number(b.amountPaid)||0; });
+  const totalIncome = rent+maintenance+electricity+water+parking+otherIncome;
+  const expenseByCategory = {};
+  expRecs.forEach(e=>{ expenseByCategory[e.category] = (expenseByCategory[e.category]||0)+(Number(e.amount)||0); });
+  const totalExpense = Object.values(expenseByCategory).reduce((s,v)=>s+v,0);
+  const scopeUnits = propertyId==='all' ? db.units : db.units.filter(u=>u.propertyId===propertyId);
+  const outstandingRent = db.rentPayments.filter(r=>scopeUnits.some(u=>u.id===r.unitId)).reduce((s,r)=>s+Math.max(0,rentBalanceDue(r)),0);
+  const outstandingElectricity = db.electricityBills.filter(b=>scopeUnits.some(u=>u.id===b.unitId)).reduce((s,b)=>s+Math.max(0,billBalanceDue(b)),0);
+  const expectedIncome = rentRecs.reduce((s,r)=>s+rentTotalPayable(r),0) + elecRecs.reduce((s,b)=>s+billTotalPayable(b),0);
+  const actualCollection = rentRecs.reduce((s,r)=>s+(Number(r.amountReceived)||0),0) + elecRecs.reduce((s,b)=>s+(Number(b.amountPaid)||0),0);
+  const collectionEfficiency = expectedIncome>0 ? Math.round((actualCollection/expectedIncome)*10000)/100 : null;
+  return {
+    income:{rent,maintenance,electricity,water,parking,other:otherIncome,total:totalIncome},
+    expense:{byCategory:expenseByCategory, total:totalExpense},
+    netSurplusDeficit:totalIncome-totalExpense,
+    outstandingRent, outstandingElectricity, expectedIncome, actualCollection, collectionEfficiency
+  };
+}
+state.pnl = state.pnl || {propertyId:'all', periodType:'Monthly', month:MONTH_NAMES[new Date().getMonth()], year:new Date().getFullYear(), from:'', to:''};
+function pnlComputeRange(){
+  const p = state.pnl;
+  if(p.periodType==='Monthly'){
+    const mIdx = MONTH_NAMES.indexOf(p.month);
+    const from = p.year+'-'+String(mIdx+1).padStart(2,'0')+'-01';
+    const lastDay = new Date(p.year, mIdx+1, 0).getDate();
+    const to = p.year+'-'+String(mIdx+1).padStart(2,'0')+'-'+String(lastDay).padStart(2,'0');
+    return {from,to};
+  }
+  if(p.periodType==='Yearly') return {from:p.year+'-01-01', to:p.year+'-12-31'};
+  return {from:p.from, to:p.to};
+}
+function renderProfitLoss(){
+  const p = state.pnl;
+  const {from,to} = pnlComputeRange();
+  const r = computeProfitLoss(p.propertyId, from, to);
+  const propOpts = ['<option value="all">All Properties (Combined)</option>'].concat(db.properties.map(pr=>`<option value="${pr.id}" ${p.propertyId===pr.id?'selected':''}>${escapeHtml(pr.name)}</option>`)).join('');
+  const periodOpts = ['Monthly','Yearly','Custom'].map(x=>`<option value="${x}" ${p.periodType===x?'selected':''}>${x}</option>`).join('');
+  const monthOpts = MONTH_NAMES.map(m=>`<option value="${m}" ${p.month===m?'selected':''}>${m}</option>`).join('');
+  const expenseRows = Object.keys(r.expense.byCategory).map(cat=>`<div class="dl">${escapeHtml(cat)}</div><div class="dv">${formatCurrency(r.expense.byCategory[cat])}</div>`).join('');
+  return moreSubtabsHTML('profitLoss') + `
+    <div class="toolbar no-print">
+      <select id="pnlProperty">${propOpts}</select>
+      <select id="pnlPeriodType">${periodOpts}</select>
+      ${p.periodType==='Monthly'?`<select id="pnlMonth">${monthOpts}</select><input id="pnlYear" type="number" value="${p.year}">`:''}
+      ${p.periodType==='Yearly'?`<input id="pnlYear" type="number" value="${p.year}">`:''}
+      ${p.periodType==='Custom'?`<label style="font-size:12.5px;">From <input type="date" id="pnlFrom" value="${escapeHtml(p.from)}"></label><label style="font-size:12.5px;">To <input type="date" id="pnlTo" value="${escapeHtml(p.to)}"></label>`:''}
+      <div class="spacer"></div>
+      <button class="btn secondary" data-action="print-view">🖨️ Print</button>
+      <button class="btn secondary" data-action="export-pnl-csv">⬇️ Export CSV</button>
+    </div>
+    <p style="font-size:12.5px;color:var(--muted);">Period: ${formatDate(from)} to ${formatDate(to)}</p>
+    <div class="section-title">💰 Income</div>
+    <div class="detail-grid">
+      <div class="dl">Rent Collected</div><div class="dv">${formatCurrency(r.income.rent)}</div>
+      <div class="dl">Maintenance Collected</div><div class="dv">${formatCurrency(r.income.maintenance)}</div>
+      <div class="dl">Electricity Collected</div><div class="dv">${formatCurrency(r.income.electricity)}</div>
+      <div class="dl">Water Collected</div><div class="dv">${formatCurrency(r.income.water)}</div>
+      <div class="dl">Parking Collected</div><div class="dv">${formatCurrency(r.income.parking)}</div>
+      <div class="dl">Other Income</div><div class="dv">${formatCurrency(r.income.other)}</div>
+      <div class="dl"><b>Total Income</b></div><div class="dv"><b>${formatCurrency(r.income.total)}</b></div>
+    </div>
+    <div class="section-title">💸 Expenses</div>
+    <div class="detail-grid">
+      ${expenseRows || '<div class="empty-note" style="grid-column:1/-1;">No expenses recorded for this period.</div>'}
+      <div class="dl"><b>Total Expense</b></div><div class="dv"><b>${formatCurrency(r.expense.total)}</b></div>
+    </div>
+    <div class="section-title">📊 Summary</div>
+    <div class="cards-grid">
+      <div class="card"><div class="num">${formatCurrency(r.netSurplusDeficit)}</div><div class="lbl">${r.netSurplusDeficit>=0?'Net Surplus':'Net Deficit'}</div></div>
+      <div class="card"><div class="num">${formatCurrency(r.outstandingRent)}</div><div class="lbl">Outstanding Rent</div></div>
+      <div class="card"><div class="num">${formatCurrency(r.outstandingElectricity)}</div><div class="lbl">Outstanding Electricity</div></div>
+      <div class="card"><div class="num">${formatCurrency(r.expectedIncome)}</div><div class="lbl">Expected Income (Billed)</div></div>
+      <div class="card"><div class="num">${formatCurrency(r.actualCollection)}</div><div class="lbl">Actual Collection</div></div>
+      <div class="card"><div class="num">${r.collectionEfficiency===null?'N/A':r.collectionEfficiency+'%'}</div><div class="lbl">Collection Efficiency %</div></div>
+    </div>
+  `;
+}
+function attachProfitLossHandlers(){
+  const p = state.pnl;
+  const propSel = document.getElementById('pnlProperty'), periodSel = document.getElementById('pnlPeriodType');
+  const monthSel = document.getElementById('pnlMonth'), yearInput = document.getElementById('pnlYear');
+  const fromInput = document.getElementById('pnlFrom'), toInput = document.getElementById('pnlTo');
+  if(propSel) propSel.addEventListener('change', ()=>{ p.propertyId = propSel.value; render(); });
+  if(periodSel) periodSel.addEventListener('change', ()=>{ p.periodType = periodSel.value; render(); });
+  if(monthSel) monthSel.addEventListener('change', ()=>{ p.month = monthSel.value; render(); });
+  if(yearInput) yearInput.addEventListener('change', ()=>{ p.year = Number(yearInput.value)||p.year; render(); });
+  if(fromInput) fromInput.addEventListener('change', ()=>{ p.from = fromInput.value; render(); });
+  if(toInput) toInput.addEventListener('change', ()=>{ p.to = toInput.value; render(); });
+}
+function exportProfitLossCSV(){
+  const p = state.pnl;
+  const {from,to} = pnlComputeRange();
+  const r = computeProfitLoss(p.propertyId, from, to);
+  const propName = p.propertyId==='all' ? 'All Properties (Combined)' : (propertyById(p.propertyId)||{}).name;
+  const lines = [
+    ['Property', propName], ['Period', formatDate(from)+' to '+formatDate(to)], [''],
+    ['Income',''], ['Rent Collected', r.income.rent], ['Maintenance Collected', r.income.maintenance],
+    ['Electricity Collected', r.income.electricity], ['Water Collected', r.income.water],
+    ['Parking Collected', r.income.parking], ['Other Income', r.income.other], ['Total Income', r.income.total], [''],
+    ['Expenses','']
+  ];
+  Object.keys(r.expense.byCategory).forEach(cat=>lines.push([cat, r.expense.byCategory[cat]]));
+  lines.push(['Total Expense', r.expense.total], [''],
+    ['Net Surplus / Deficit', r.netSurplusDeficit],
+    ['Outstanding Rent', r.outstandingRent], ['Outstanding Electricity', r.outstandingElectricity],
+    ['Expected Income', r.expectedIncome], ['Actual Collection', r.actualCollection],
+    ['Collection Efficiency %', r.collectionEfficiency===null?'N/A':r.collectionEfficiency]
+  );
+  const csv = lines.map(row=>row.map(cell=>{
+    const s = String(cell===undefined||cell===null?'':cell);
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  }).join(',')).join('\n');
+  downloadFile('profit-loss-'+todayISO()+'.csv', csv, 'text/csv');
+}
+
+/* ---------------------------------------------------------------------- */
 /* SETTINGS + BACKUP/RESTORE                                              */
 /* ---------------------------------------------------------------------- */
+function settingsForForm(s){
+  // lateFeeEnabled is stored as boolean but rendered as a Yes/No select.
+  return Object.assign({}, s, {lateFeeEnabled: s.lateFeeEnabled ? 'Yes' : 'No'});
+}
 function renderSettings(){
   const s = db.settings;
+  const historyRows = (db.backupHistory||[]).slice(0,15).map(h=>`
+    <tr><td>${formatDate(h.date.slice(0,10))} ${h.date.slice(11,16)}</td><td>${escapeHtml(h.type)}</td><td>${escapeHtml(h.fileName)}</td><td>${h.recordCount}</td></tr>
+  `).join('');
   return `
     <div class="settings-block">
       <h3>⚙️ Owner &amp; Defaults</h3>
-      <div class="form-grid">${fieldsToHTML(SETTINGS_FIELDS, s)}</div>
+      <div class="form-grid">${fieldsToHTML(SETTINGS_FIELDS, settingsForForm(s))}</div>
       <p style="font-size:12px;color:var(--muted);margin-top:8px;">Currency: INR (₹). Changing the default electricity rate only affects future bills — every saved bill keeps the rate that was used at the time it was generated. Units and properties may override this default rate individually (Unit override → Property override → Global default).</p>
       <div class="form-actions"><button class="btn" id="saveSettingsBtn">💾 Save Settings</button></div>
     </div>
     <div class="settings-block">
+      <h3>💬 WhatsApp Reminder Templates</h3>
+      <p style="font-size:12px;color:var(--muted);">Use placeholders like {{tenantName}}, {{propertyName}}, {{unitNumber}}, {{month}}, {{year}}, {{totalPayable}} — these are filled in automatically. Every message can still be edited by hand right before sending.</p>
+      <div class="form-grid">${fieldsToHTML(REMINDER_TEMPLATE_FIELDS, s)}</div>
+      <div class="form-actions"><button class="btn" id="saveTemplatesBtn">💾 Save Templates</button></div>
+    </div>
+    <div class="settings-block">
       <h3>💾 Backup &amp; Restore</h3>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn secondary" id="backupBtn">⬇️ Download Backup (JSON)</button>
+        <button class="btn secondary" id="backupFullBtn">⬇️ Full Rental Backup</button>
+        <button class="btn secondary" id="backupSettingsBtn">⬇️ Settings Backup</button>
+        <button class="btn secondary" id="backupFinancialBtn">⬇️ Financial Records Backup</button>
         <label class="btn secondary" style="display:inline-flex;align-items:center;">⬆️ Restore from Backup
           <input type="file" accept=".json" id="restoreInput" style="display:none;">
         </label>
       </div>
-      <p style="font-size:12.5px;color:var(--muted);margin-top:10px;">Backup includes every Rental Manager section: Properties, Units, Tenants, Occupancy History, Rent Payments, Electricity Readings &amp; Bills, Combined Bills, Security Deposits, Expenses, Maintenance Complaints, Agreements, Notifications and Settings. Restoring validates the file first and asks for confirmation before replacing data. WBCYN, Clinic Manager and Trust Manager data are stored separately and are unaffected.</p>
+      <div class="form-field" style="margin-top:10px;max-width:320px;">
+        <label>Property-specific Backup</label>
+        <div style="display:flex;gap:8px;">
+          <select id="backupPropertySelect">${db.properties.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}</select>
+          <button class="btn sm secondary" id="backupPropertyBtn">⬇️ Download</button>
+        </div>
+      </div>
+      <p style="font-size:12.5px;color:var(--muted);margin-top:10px;">Backup includes every Rental Manager section: Properties, Units, Tenants, Occupancy History, Agreements, Rent Bills &amp; Payments, Electricity Readings &amp; Bills, Combined Bills, Security Deposits, Expenses, Maintenance Records, Notifications, Reminder Templates, Settings and Receipt Numbering. Restoring validates the file, shows the backup date, version and record count, and lets you choose to Merge or Replace before anything changes. WBCYN, Clinic Manager and Trust Manager data are stored separately and are never affected. A backup is only ever recorded in the history below once your browser has actually started the download.</p>
+      <div class="section-title" style="margin-top:14px;">🧾 Backup History (metadata only)</div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>File Name</th><th>Records</th></tr></thead>
+      <tbody>${historyRows || '<tr><td colspan="4" class="empty-note">No backups downloaded yet.</td></tr>'}</tbody></table></div>
     </div>
     <div class="settings-block">
       <h3>⚠️ Reset Rental Manager Data</h3>
@@ -2282,18 +3267,161 @@ function renderSettings(){
     </div>
   `;
 }
+function nowTimestampShort(){
+  const d = new Date();
+  const pad = n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+function recordCountOf(obj){
+  const keys = ['properties','units','tenants','occupancyHistory','rentPayments','electricityBills','combinedBills','deposits','expenses','complaints','agreements'];
+  return keys.reduce((s,k)=>s+((obj[k]||[]).length),0);
+}
+function logBackupHistory(type, fileName, recordCount){
+  db.backupHistory = db.backupHistory||[];
+  db.backupHistory.unshift({id:uid(), date:new Date().toISOString(), type, fileName, recordCount});
+  if(db.backupHistory.length>50) db.backupHistory = db.backupHistory.slice(0,50);
+  saveDB();
+}
+function downloadFullBackup(){
+  const payload = Object.assign({}, db, {backupMeta:{type:'Full', version:SCHEMA_VERSION, exportedAt:new Date().toISOString()}});
+  const fileName = 'JM-Rental-Backup-'+nowTimestampShort()+'.json';
+  downloadFile(fileName, JSON.stringify(payload, null, 2));
+  logBackupHistory('Full', fileName, recordCountOf(db));
+  render();
+}
+function downloadPropertyBackup(propertyId){
+  const prop = propertyById(propertyId);
+  if(!prop){ alert('Property not found.'); return; }
+  const unitIds = new Set(db.units.filter(u=>u.propertyId===propertyId).map(u=>u.id));
+  const tenantIds = new Set(db.tenants.filter(t=>unitIds.has(t.unitId)).map(t=>t.id));
+  const payload = {
+    backupMeta:{type:'Property-specific', property:prop.name, version:SCHEMA_VERSION, exportedAt:new Date().toISOString()},
+    properties:[prop],
+    units: db.units.filter(u=>unitIds.has(u.id)),
+    tenants: db.tenants.filter(t=>tenantIds.has(t.id)),
+    occupancyHistory: db.occupancyHistory.filter(o=>unitIds.has(o.unitId)),
+    rentPayments: db.rentPayments.filter(r=>unitIds.has(r.unitId)),
+    electricityBills: db.electricityBills.filter(b=>unitIds.has(b.unitId)),
+    combinedBills: db.combinedBills.filter(c=>unitIds.has(c.unitId)),
+    deposits: db.deposits.filter(d=>unitIds.has(d.unitId)),
+    expenses: db.expenses.filter(e=>e.propertyId===propertyId),
+    complaints: db.complaints.filter(c=>unitIds.has(c.unitId)),
+    agreements: db.agreements.filter(a=>unitIds.has(a.unitId))
+  };
+  const fileName = 'JM-Rental-Backup-'+prop.name.replace(/\s+/g,'')+'-'+nowTimestampShort()+'.json';
+  downloadFile(fileName, JSON.stringify(payload, null, 2));
+  logBackupHistory('Property: '+prop.name, fileName, recordCountOf(payload));
+  render();
+}
+function downloadSettingsBackup(){
+  const payload = {backupMeta:{type:'Settings', version:SCHEMA_VERSION, exportedAt:new Date().toISOString()}, settings: db.settings};
+  const fileName = 'JM-Rental-Settings-Backup-'+nowTimestampShort()+'.json';
+  downloadFile(fileName, JSON.stringify(payload, null, 2));
+  logBackupHistory('Settings', fileName, 1);
+  render();
+}
+function downloadFinancialBackup(){
+  const payload = {
+    backupMeta:{type:'Financial Records', version:SCHEMA_VERSION, exportedAt:new Date().toISOString()},
+    rentPayments: db.rentPayments, electricityBills: db.electricityBills, combinedBills: db.combinedBills,
+    deposits: db.deposits, expenses: db.expenses
+  };
+  const fileName = 'JM-Rental-Financial-Backup-'+nowTimestampShort()+'.json';
+  downloadFile(fileName, JSON.stringify(payload, null, 2));
+  logBackupHistory('Financial Records', fileName, recordCountOf(payload));
+  render();
+}
+function openRestoreReviewModal(parsed, fileName){
+  const structuralOk = validateRentalBackup(parsed).ok;
+  const meta = parsed.backupMeta || {};
+  const type = meta.type || (parsed.settings && !structuralOk ? 'Settings' : (structuralOk ? 'Full' : 'Unknown'));
+  if(type==='Unknown'){ alert('This does not look like a valid Rental Manager backup file.'); return; }
+  const counts = recordCountOf(parsed);
+  const summary = `Backup Type: ${type}\nExported: ${meta.exportedAt ? (formatDate(meta.exportedAt.slice(0,10))+' '+meta.exportedAt.slice(11,16)) : 'Unknown'}\nSchema Version: ${meta.version||'Unknown'}\nTotal Records: ${counts}`;
+  const isSettingsOnly = type==='Settings';
+  const isPartial = type==='Property-specific' || type==='Financial Records';
+  const canReplace = type==='Full';
+  openModal('📥 Restore Backup — '+escapeHtml(fileName), `
+    <pre style="white-space:pre-wrap;font-size:13px;background:var(--light-blue);padding:10px;border-radius:8px;">${escapeHtml(summary)}</pre>
+    <p style="font-size:12.5px;color:var(--muted);">${isSettingsOnly?'This is a Settings-only backup — it will update your Settings without touching any properties, tenants or bills.':
+      isPartial?'This is a partial backup ('+escapeHtml(type)+'). It can only be Merged into your existing data (adding/updating matching records) — Replace is disabled for partial backups to avoid accidentally erasing records that are not included in this file.':
+      'Merge adds/updates records without deleting anything currently on this device. Replace erases current Rental Manager data and substitutes the backup contents. WBCYN, Clinic Manager and Trust Manager data are never affected either way.'}</p>
+  `, isSettingsOnly
+    ? `<button class="btn grey" id="restoreCancel">Cancel</button><button class="btn" id="restoreSettingsOnly">Restore Settings</button>`
+    : `<button class="btn grey" id="restoreCancel">Cancel</button><button class="btn secondary" id="restoreMerge">🔀 Merge with Existing Data</button>${canReplace?`<button class="btn danger" id="restoreReplace">♻️ Replace Rental Data</button>`:''}`);
+  document.getElementById('restoreCancel').onclick = closeModal;
+  if(isSettingsOnly){
+    document.getElementById('restoreSettingsOnly').onclick = ()=>{ closeModal(); performRestore(parsed, 'merge', type); };
+  }else{
+    document.getElementById('restoreMerge').onclick = ()=>{ closeModal(); performRestore(parsed, 'merge', type); };
+    const replaceBtn = document.getElementById('restoreReplace');
+    if(replaceBtn) replaceBtn.onclick = ()=>{
+      if(!confirm('This will PERMANENTLY REPLACE all current Rental Manager data with the contents of this backup. This cannot be undone. Continue?')) return;
+      closeModal(); performRestore(parsed, 'replace', type);
+    };
+  }
+}
+function performRestore(parsed, mode, type){
+  const before = JSON.parse(JSON.stringify(db));
+  try{
+    if(type==='Settings'){
+      db.settings = Object.assign({}, db.settings, parsed.settings||{});
+      saveDB(); renderHeader(); alert('Settings restored successfully.'); goto('settings');
+      return;
+    }
+    const arrayKeys = ['properties','units','tenants','occupancyHistory','rentPayments','electricityBills','combinedBills','deposits','expenses','complaints','agreements'];
+    if(mode==='replace'){
+      arrayKeys.forEach(k=>{ if(Array.isArray(parsed[k])) db[k] = parsed[k]; });
+      if(parsed.settings) db.settings = Object.assign({}, db.settings, parsed.settings);
+      if(parsed.nextIds) db.nextIds = Object.assign({}, db.nextIds, parsed.nextIds);
+    }else{
+      arrayKeys.forEach(k=>{
+        if(!Array.isArray(parsed[k])) return;
+        parsed[k].forEach(rec=>{
+          const idx = db[k].findIndex(x=>x.id===rec.id);
+          if(idx>=0) db[k][idx] = Object.assign({}, db[k][idx], rec);
+          else db[k].push(rec);
+        });
+      });
+    }
+    db = ensureShape(db);
+    saveDB();
+    renderHeader();
+    goto('dashboard');
+    alert((mode==='merge'?'Merge':'Replace')+' restore complete. '+recordCountOf(parsed)+' record(s) processed from the backup. Existing WBCYN, Clinic and Trust data were not touched.');
+  }catch(e){
+    db = before;
+    saveDB();
+    alert('Restore failed — no changes were made and your existing Rental Manager data has been preserved.\n\n'+(e&&e.message?e.message:''));
+  }
+}
 function attachSettingsHandlers(){
   const saveBtn = document.getElementById('saveSettingsBtn');
   if(saveBtn) saveBtn.addEventListener('click', ()=>{
     const vals = readFieldsFromForm(SETTINGS_FIELDS, document.getElementById('app'));
+    vals.lateFeeEnabled = vals.lateFeeEnabled==='Yes';
     Object.assign(db.settings, vals);
     saveDB();
     renderHeader();
     alert('Settings saved.');
   });
-  const backupBtn = document.getElementById('backupBtn');
-  if(backupBtn) backupBtn.addEventListener('click', ()=>{
-    downloadFile('rental-manager-backup-'+nowTimestamp()+'.json', JSON.stringify(db, null, 2));
+  const saveTemplatesBtn = document.getElementById('saveTemplatesBtn');
+  if(saveTemplatesBtn) saveTemplatesBtn.addEventListener('click', ()=>{
+    const vals = readFieldsFromForm(REMINDER_TEMPLATE_FIELDS, document.getElementById('app'));
+    Object.assign(db.settings, vals);
+    saveDB();
+    alert('Reminder templates saved.');
+  });
+  const backupFullBtn = document.getElementById('backupFullBtn');
+  if(backupFullBtn) backupFullBtn.addEventListener('click', downloadFullBackup);
+  const backupSettingsBtn = document.getElementById('backupSettingsBtn');
+  if(backupSettingsBtn) backupSettingsBtn.addEventListener('click', downloadSettingsBackup);
+  const backupFinancialBtn = document.getElementById('backupFinancialBtn');
+  if(backupFinancialBtn) backupFinancialBtn.addEventListener('click', downloadFinancialBackup);
+  const backupPropertyBtn = document.getElementById('backupPropertyBtn');
+  if(backupPropertyBtn) backupPropertyBtn.addEventListener('click', ()=>{
+    const sel = document.getElementById('backupPropertySelect');
+    if(sel && sel.value) downloadPropertyBackup(sel.value);
   });
   const restoreInput = document.getElementById('restoreInput');
   if(restoreInput) restoreInput.addEventListener('change', ()=>{
@@ -2304,17 +3432,7 @@ function attachSettingsHandlers(){
       let parsed;
       try{ parsed = JSON.parse(reader.result); }
       catch(e){ alert('Invalid backup file: not valid JSON.'); return; }
-      const validation = validateRentalBackup(parsed);
-      if(!validation.ok){ alert('This does not look like a valid Rental Manager backup file.\n\n'+validation.reason); return; }
-      const summary = `Properties: ${(parsed.properties||[]).length}\nUnits: ${(parsed.units||[]).length}\nTenants: ${(parsed.tenants||[]).length}\nRent Payments: ${(parsed.rentPayments||[]).length}\nElectricity Bills: ${(parsed.electricityBills||[]).length}`;
-      if(!confirm('This will replace ALL current Rental Manager data with the contents of this backup file.\n\nBackup contains:\n'+summary+'\n\nThis cannot be undone. Continue?')) return;
-      try{
-        db = ensureShape(parsed);
-        saveDB();
-        renderHeader();
-        goto('dashboard');
-        alert('Restore complete.');
-      }catch(e){ alert('Invalid backup file.'); }
+      openRestoreReviewModal(parsed, file.name);
     };
     reader.readAsText(file);
   });
@@ -2383,7 +3501,7 @@ function render(){
   const app = document.getElementById('app');
   const id = state.editingId;
   switch(state.view){
-    case 'dashboard': app.innerHTML = renderDashboard(); break;
+    case 'dashboard': app.innerHTML = renderDashboard(); attachAnalyticsHandlers(); break;
     case 'properties': app.innerHTML = renderProperties(); break;
     case 'propertyForm': renderPropertyForm(id); break;
     case 'propertyProfile': app.innerHTML = renderPropertyProfile(id); break;
@@ -2394,12 +3512,16 @@ function render(){
     case 'tenantForm': renderTenantForm(id); break;
     case 'tenantProfile': app.innerHTML = renderTenantProfile(id); break;
     case 'occupancyHistory': app.innerHTML = renderOccupancyHistory(); break;
+    case 'receiptHistory': app.innerHTML = renderReceiptHistory(); break;
     case 'rent': app.innerHTML = renderRent(); break;
     case 'rentForm': renderRentForm(id); break;
     case 'electricity': app.innerHTML = renderElectricity(); break;
     case 'electricityForm': renderElectricityForm(id); break;
     case 'combinedBills': app.innerHTML = renderCombinedBills(); break;
     case 'combinedBillForm': renderCombinedBillForm(id); break;
+    case 'billingCentre': app.innerHTML = renderBillingCentre(); attachBillingCentreHandlers(); break;
+    case 'occupancy': app.innerHTML = renderOccupancy(); attachOccupancyHandlers(); break;
+    case 'profitLoss': app.innerHTML = renderProfitLoss(); attachProfitLossHandlers(); break;
     case 'deposits': app.innerHTML = renderDeposits(); break;
     case 'depositForm': renderDepositForm(id); break;
     case 'expenses': app.innerHTML = renderExpenses(); break;
@@ -2476,6 +3598,16 @@ function wireDelegatedActions(){
 
         case 'print-combined-bill': printCombinedBill(id); break;
         case 'edit-combined-bill': goto('combinedBillForm', id); break;
+        case 'finalise-combined-bill':{
+          const c = db.combinedBills.find(x=>x.id===id);
+          if(c && confirm('Finalise this bill? It will move from Draft to Finalised and be ready for collection and reminders.')){ c.status = 'Finalised'; saveDB(); render(); }
+          break;
+        }
+        case 'cancel-combined-bill':{
+          const c = db.combinedBills.find(x=>x.id===id);
+          if(c && confirm('Cancel this bill? It will be kept in history marked as Cancelled but will no longer count as outstanding.')){ c.status = 'Cancelled'; saveDB(); render(); }
+          break;
+        }
         case 'delete-combined-bill':
           if(confirm('Delete this combined bill?')){ db.combinedBills = db.combinedBills.filter(x=>x.id!==id); saveDB(); render(); }
           break;
@@ -2505,13 +3637,27 @@ function wireDelegatedActions(){
         case 'delete-attachment': deleteAttachment(el.getAttribute('data-kind'), id, el.getAttribute('data-attid')); break;
         case 'print-view': window.print(); break;
 
+        case 'whatsapp-reminder': sendWhatsAppReminder(el.getAttribute('data-kind'), el.getAttribute('data-recid')); break;
+        case 'print-deposit-receipt': printDepositReceipt(id); break;
+        case 'print-deposit-refund-receipt': printDepositRefundReceipt(id); break;
+        case 'share-rent-receipt': shareRentReceipt(id); break;
+        case 'share-electricity-bill': shareElectricityBill(id); break;
+        case 'share-combined-bill': shareCombinedBill(id); break;
+
         case 'mark-notification-read': markNotificationRead(el.getAttribute('data-nid')); break;
         case 'mark-all-notifications-read': markAllNotificationsRead(); break;
         case 'delete-notification': deleteNotification(el.getAttribute('data-nid')); break;
+        case 'snooze-notification':{
+          const days = prompt('Snooze this alert for how many days?','3');
+          if(days!==null && Number(days)>0) snoozeNotification(el.getAttribute('data-nid'), Number(days));
+          break;
+        }
         case 'open-notification': openNotificationLink(el.getAttribute('data-linkview'), el.getAttribute('data-linkid')); break;
         case 'filter-notifications': state.notificationFilter = el.getAttribute('data-filter'); render(); break;
 
         case 'global-search': openGlobalSearchModal(); break;
+        case 'toggle-analytics': state.analytics.collapsed = !state.analytics.collapsed; render(); break;
+        case 'export-pnl-csv': exportProfitLossCSV(); break;
       }
     });
   });

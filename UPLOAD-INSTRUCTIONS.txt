@@ -1,39 +1,44 @@
-JM DIGITAL OFFICE — v1.3.0 (Rental Manager) — GITHUB UPLOAD INSTRUCTIONS
-=========================================================================
+JM DIGITAL OFFICE — v1.4.0 (Rental Manager Enhanced) — GITHUB UPLOAD INSTRUCTIONS
+==================================================================================
 
-This folder contains EVERYTHING that needs to be uploaded to GitHub to
-activate Rental Manager on your live site. Just follow these simple steps:
+This folder contains everything needed to upgrade your live site to v1.4.0.
+Only the Rental Manager module has new features in this release — WBCYN
+Registrar, Clinic Manager and Trust Manager are unchanged and will keep
+working exactly as before.
 
-1. Open your GitHub repository in a web browser.
+Steps:
 
-2. Click "Add file" (top right of the file list), then click "Upload files".
+1. Open the GitHub repository.
+2. Click "Add file".
+3. Click "Upload files".
+4. Drag all contents of this folder into the upload box
+   (index.html, manifest.json, service-worker.js, sw-update.js,
+   launcher.js, launcher.css, coming-soon.html, .nojekyll, icons,
+   wbcyn, clinic, trust, rental).
+5. Commit message:
+   Upgrade Rental Manager to v1.4.0
+6. Click "Commit changes".
+7. Wait for the green GitHub Pages deployment (check the Actions tab or
+   Settings → Pages for the green checkmark, usually 1–2 minutes).
+8. Reload the iPhone website (or any browser).
+9. Reinstall the Home Screen app only if the old version remains cached
+   after reloading twice — a "New version available. Reload?" banner
+   should normally appear and update the app in place, so this is
+   usually not necessary.
 
-3. Open THIS folder on your computer and select everything inside it
-   (all files and all folders: index.html, manifest.json,
-   service-worker.js, sw-update.js, launcher.js, launcher.css,
-   coming-soon.html, icons, wbcyn, clinic, trust, rental).
-   Drag all of it into the GitHub upload box.
+What's new in v1.4.0 (Rental Manager only):
+- WhatsApp reminders for tenants (rent, electricity, combined bill,
+  agreement expiry, deposit settlement, general acknowledgement)
+- Professional printable receipts (rent, electricity, combined,
+  deposit, deposit refund) + Receipt History
+- Monthly Billing Centre for batch bill generation with duplicate
+  and paid-bill protection
+- Occupancy Overview with summary cards and filters
+- Analytics section with income/expense/occupancy charts (collapsible)
+- Monthly Profit & Loss report with CSV export
+- Enhanced backup and restore (Full / Property / Settings / Financial)
+  with a Backup History log
+- Smarter dashboard alerts with priority tiers and snooze
 
-4. In the "Commit message" box at the bottom, type:
-   Activate Rental Manager v1.3.0
-
-5. Click the green "Commit changes" button.
-
-6. Wait about 1–2 minutes for GitHub Pages to finish deploying
-   (you'll see a green checkmark next to your commit, or you can check
-   under Settings → Pages, or the "Actions" tab, for a green deployment).
-
-7. On your iPhone (or any browser), refresh the JM Digital Office website.
-
-8. If the Rental Manager card still shows "Coming Soon" after refreshing,
-   simply reload the page a second time — a "New version available.
-   Reload?" message should appear. Tap Reload.
-
-9. You only need to remove and re-add the Home Screen app icon on your
-   iPhone if step 8 does not resolve it after two refreshes. Normally
-   this will NOT be necessary — the app updates itself in place.
-
-That's it. WBCYN Registrar, Clinic Manager and Trust Manager are untouched
-and will continue working exactly as before. Only the Rental Manager card
-changes from "Coming Soon" to "Active", and a new Rental Manager module
-becomes available at rental/index.html.
+All existing properties, tenants, rent records and electricity records
+are preserved automatically — no data is lost or reset by this update.

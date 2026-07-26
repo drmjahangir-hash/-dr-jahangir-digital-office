@@ -27,8 +27,13 @@ header.appheader{background:linear-gradient(135deg,var(--dark-blue),var(--dark-b
 .header-right{text-align:right;font-size:13px;line-height:1.4;}
 .header-right .name{font-weight:700;font-size:14.5px;}
 .header-right .role{color:#cfe3f7;}
-.home-link{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.15);color:#fff;text-decoration:none;font-size:12.5px;font-weight:600;padding:5px 10px;border-radius:20px;margin-bottom:8px;border:1px solid rgba(255,255,255,.3);}
+.home-link{position:relative;z-index:2;display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.15);color:#fff;text-decoration:none;font-size:12.5px;font-weight:600;padding:5px 10px;border-radius:20px;margin-bottom:8px;border:1px solid rgba(255,255,255,.3);-webkit-tap-highlight-color:rgba(255,255,255,.35);touch-action:manipulation;}
 .home-link:hover{background:rgba(255,255,255,.28);}
+/* Invisible hit-area expansion so the full tap target meets the ~44px minimum
+   on mobile without changing the button's visible size/position (the visible
+   pill shrinks to icon-only under 480px, which is otherwise too small to
+   reliably tap). */
+.home-link::after{content:'';position:absolute;top:-10px;left:-10px;right:-10px;bottom:-10px;}
 @media (max-width:480px){ .home-link-text{display:none;} .home-link{padding:6px 9px;} }
 
 /* NAV */

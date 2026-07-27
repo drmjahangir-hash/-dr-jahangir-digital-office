@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v13';
+const CACHE_VERSION = 'jm-digital-office-v15';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [
@@ -51,7 +51,16 @@ const CORE_ASSETS = [
   './rental/styles.css',
   './rental/icons/icon-192.png',
   './rental/icons/icon-512.png',
-  './rental/icons/apple-touch-icon.png'
+  './rental/icons/apple-touch-icon.png',
+
+  './planner/index.html',
+  './planner/app.js',
+  './planner/idb.js',
+  './planner/charts.js',
+  './planner/styles.css',
+  './planner/icons/icon-192.png',
+  './planner/icons/icon-512.png',
+  './planner/icons/apple-touch-icon.png'
 ];
 
 // Third-party libraries used by sub-apps - cached best-effort so a missing

@@ -38,6 +38,9 @@
   </div>
   <div class="header-actions no-print">
     <button id="wbcynSearchBtn" class="notif-bell" title="Universal Search" aria-label="Universal Search" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:20px;padding:6px 12px;font-size:16px;">🔍</button>
+    <!-- Always-visible, header is sticky so this stays reachable even when the
+         scrolling bottom nav on narrow screens doesn't show Settings in view. -->
+    <button id="wbcynSettingsBtn" class="notif-bell" title="Settings" aria-label="Settings" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:20px;padding:6px 12px;font-size:16px;">⚙️</button>
   </div>
 </header>
 
@@ -50,7 +53,7 @@
 <div id="modalRoot"></div>
 <div id="pwaBannerRoot"></div>
 
-<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device &middot; v1.6.0</footer>
+<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device &middot; v1.6.1</footer>
 
 <script src="idb.js"></script>
 <script src="../sw-update.js"></script>

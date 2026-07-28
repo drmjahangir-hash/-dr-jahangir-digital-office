@@ -14,7 +14,7 @@
 ============================================================================ */
 
 /* ================= OFFICE / GLOBAL CONFIG ================= */
-const WBCYN_VERSION = '1.6.0';
+const WBCYN_VERSION = '1.6.1';
 const DEFAULT_OFFICE_INFO = {
   registrarName: 'Dr. M. Jahangir',
   officeName: 'West Bengal Council of Yoga and Naturopathy',
@@ -1847,7 +1847,7 @@ function fullWbcynBackupObject(){
   WBCYN_MIRRORED_STORES.forEach((s) => { obj[s] = wdb[s]; });
   return obj;
 }
-function downloadFullWbcynBackup(){ downloadBlob(`WBCYN_v1.6.0_Full_Backup_${todayISO()}.json`, JSON.stringify(fullWbcynBackupObject(), null, 2), 'application/json'); }
+function downloadFullWbcynBackup(){ downloadBlob(`WBCYN_v${WBCYN_VERSION}_Full_Backup_${todayISO()}.json`, JSON.stringify(fullWbcynBackupObject(), null, 2), 'application/json'); }
 function downloadPartialWbcynBackup(stores, label){
   const obj = { app: 'WBCYN e-Office & Administrative Control System', version: WBCYN_VERSION, exportedAt: new Date().toISOString(), stores };
   stores.forEach((s) => { obj[s] = wdb[s]; });
@@ -1901,7 +1901,7 @@ function renderWbcynSettings(){
     </div>
     <div class="settings-block">
       <h3>Backup</h3>
-      <p style="color:var(--muted);font-size:13px;">All v1.6.0 e-Office data is stored locally on this device (IndexedDB). Back up regularly, and always before importing.</p>
+      <p style="color:var(--muted);font-size:13px;">All e-Office data (v1.6+) is stored locally on this device (IndexedDB). Back up regularly, and always before importing.</p>
       <div style="display:flex;flex-wrap:wrap;gap:8px;">
         <button class="btn secondary" id="wBackupFull">Full WBCYN Backup</button>
         <button class="btn secondary" id="wBackupCorr">Inward + Outward Backup</button>
@@ -2550,6 +2550,13 @@ async function wbcynInit(){
   handleDeepLinkHash();
   const searchBtn = document.getElementById('wbcynSearchBtn');
   if (searchBtn) searchBtn.addEventListener('click', openUniversalSearch);
+  // v1.6.1: on narrow screens the bottom nav has no scroll affordance, so
+  // items past "File Movement" (including Settings, where Backup/Restore
+  // live) were unreachable on iPhone. This header button is a permanent,
+  // always-visible path to Settings on every screen size, independent of
+  // the nav bar's scroll position.
+  const settingsBtn = document.getElementById('wbcynSettingsBtn');
+  if (settingsBtn) settingsBtn.addEventListener('click', () => goSection('settings'));
 }
 wbcynInit().catch((err) => console.error('WBCYN init failed', err));
 try { renderWbcynInstallBanner(); } catch (e) { console.warn('Install banner skipped:', e); }

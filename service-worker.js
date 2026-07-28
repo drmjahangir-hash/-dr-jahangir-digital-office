@@ -8,7 +8,7 @@
    no matter whether the project is hosted at a domain root or in a GitHub
    Pages subfolder (e.g. https://username.github.io/reponame/). */
 
-const CACHE_VERSION = 'jm-digital-office-v15';
+const CACHE_VERSION = 'jm-digital-office-v16';
 
 // Core app shell - same-origin, always available.
 const CORE_ASSETS = [
@@ -27,6 +27,7 @@ const CORE_ASSETS = [
 
   './wbcyn/index.html',
   './wbcyn/app.js',
+  './wbcyn/idb.js',
   './wbcyn/styles.css',
   './wbcyn/icons/icon-192.png',
   './wbcyn/icons/icon-512.png',

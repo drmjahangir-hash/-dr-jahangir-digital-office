@@ -258,6 +258,58 @@ const HUB_LINKS = [
   { id:'aiCentre', label:'AI Command Centre', icon:'🤖' },
 ];
 
+/* ---------------------------------------------------------------------- */
+/* WBCYN INTEGRATION (v1.6.0) — read-only bridge, no data duplication      */
+/* ---------------------------------------------------------------------- */
+// Planner reads WBCYN's e-Office deadlines directly out of WBCYN's own
+// IndexedDB ('jm_wbcyn_db', opened via wbcyn/idb.js, loaded as a sibling
+// <script> in index.html) every time it renders — nothing is copied into
+// Planner's own database. Editing the original record in WBCYN is
+// immediately reflected here on next render because this is the live
+// source, not a cached copy. If wbcyn/idb.js failed to load for any
+// reason, wbcynBridge stays null and these items are simply omitted.
+const WBCYN_BRIDGE_STORES = ['wbcynAssignments', 'wbcynInward', 'wbcynOutward', 'wbcynHigherAuthorityFiles', 'wbcynLegalMatters', 'wbcynRTI', 'wbcynMeetings'];
+let wbcynBridge = null;
+async function loadWbcynBridge(){
+  try {
+    if (typeof WBCYN_IDB === 'undefined') { wbcynBridge = null; return; }
+    await WBCYN_IDB.open();
+    const results = await Promise.all(WBCYN_BRIDGE_STORES.map((s) => WBCYN_IDB.getAll(s)));
+    wbcynBridge = {};
+    WBCYN_BRIDGE_STORES.forEach((s, i) => { wbcynBridge[s] = results[i]; });
+  } catch (e) {
+    console.warn('WBCYN bridge unavailable (WBCYN may never have been opened on this device yet):', e);
+    wbcynBridge = null;
+  }
+}
+function mapWbcynPriority(p){ return { Critical: 'critical', Urgent: 'high', High: 'high', Normal: 'medium', Low: 'low' }[p] || 'medium'; }
+function wbcynDeadlineItems(){
+  if (!wbcynBridge) return [];
+  const items = [];
+  const push = (date, title, priority, closed, section, id) => {
+    if (!date) return;
+    items.push({ id: 'WBCYN::' + section + '::' + id, title: '🏛️ ' + title, date, time: '', priority: priority || 'medium', status: closed ? 'completed' : 'pending', kind: 'wbcyn', wbcynSection: section, wbcynId: id });
+  };
+  (wbcynBridge.wbcynAssignments || []).forEach((a) => { if (!a.archived) push(a.deadlineDate, a.title, mapWbcynPriority(a.priority), ['Verified', 'Closed', 'Cancelled', 'Rejected'].includes(a.status), 'assignments', a.id); });
+  (wbcynBridge.wbcynInward || []).forEach((r) => { if (!r.archived) push(r.actionDeadline || r.nextActionDate, r.subject || 'Inward action', 'medium', ['Closed', 'Filed', 'No Action Required', 'Reply Issued'].includes(r.status), 'inward', r.id); });
+  (wbcynBridge.wbcynOutward || []).forEach((r) => { if (!r.archived) push(r.expectedReplyDate, (r.subject || 'Outward reply expected'), 'medium', ['Closed', 'Cancelled'].includes(r.status), 'outward', r.id); });
+  (wbcynBridge.wbcynHigherAuthorityFiles || []).forEach((r) => { if (!r.archived) push(r.expectedDecisionDate, r.fileTitle || 'Higher authority file', 'medium', ['Approved', 'Sanctioned', 'Rejected', 'Closed', 'Returned', 'Partly Approved'].includes(r.status), 'files', r.id); });
+  (wbcynBridge.wbcynLegalMatters || []).forEach((r) => {
+    if (r.archived) return;
+    push(r.nextHearingDate, 'Court hearing: ' + (r.caseNumber || ''), 'high', ['Disposed', 'Closed'].includes(r.status), 'legal', r.id);
+    if (r.complianceDeadline) push(r.complianceDeadline, 'Court compliance: ' + (r.caseNumber || ''), 'high', r.status === 'Compliance Completed', 'legal', r.id + '_compliance');
+  });
+  (wbcynBridge.wbcynRTI || []).forEach((r) => { if (!r.archived) push(r.replyDeadline, 'RTI reply due: ' + (r.applicantName || ''), 'medium', ['Replied', 'Disposed'].includes(r.status), 'rti', r.id); });
+  (wbcynBridge.wbcynMeetings || []).forEach((r) => { if (!r.archived) push(r.followUpDate, 'Meeting follow-up: ' + (r.meetingTitle || ''), 'medium', ['Closed', 'Cancelled'].includes(r.status), 'meetings', r.id); });
+  return items;
+}
+function openWbcynLinkedItem(compoundId){
+  const [, section, id] = compoundId.split('::');
+  openModal('🏛️ Source: WBCYN', `<p>This item is managed in WBCYN and shown here for reference only. Edit it in WBCYN — changes appear here automatically.</p>`,
+    `<button type="button" class="btn grey" id="wbcynLinkClose">Close</button><a class="btn" href="../wbcyn/index.html#goto=${encodeURIComponent(section)}&id=${encodeURIComponent(id)}">Open in WBCYN</a>`);
+  document.getElementById('wbcynLinkClose').addEventListener('click', closeModal);
+}
+
 const state = {
   view: 'dashboard',
   editingId: null,
@@ -621,7 +673,7 @@ Object.assign(ACTION_HANDLERS, {
   // Calendar pills render both tasks/events AND assignments through the
   // same "edit-task" action (see itemsByDateMap's assignment view-model) —
   // route by id prefix rather than touching every calendar renderer.
-  'edit-task': (id) => id && id.startsWith('ASSIGN-') ? openAssignmentForm(id) : openTaskForm(id),
+  'edit-task': (id) => id && id.startsWith('WBCYN::') ? openWbcynLinkedItem(id) : id && id.startsWith('ASSIGN-') ? openAssignmentForm(id) : openTaskForm(id),
   'delete-task': (id) => { if(confirm('Delete this task permanently?')){ deleteRecord('tasks', id); render(); } },
   'duplicate-task': (id) => {
     const t = taskById(id);
@@ -637,6 +689,7 @@ Object.assign(ACTION_HANDLERS, {
     // done/not-done checkbox, so route to the full editor instead of
     // silently flipping status — see the "edit-task" handler above for the
     // same id-prefix routing rationale.
+    if(id && id.startsWith('WBCYN::')){ el.checked = false; openWbcynLinkedItem(id); return; }
     if(id && id.startsWith('ASSIGN-')){ el.checked = false; openAssignmentForm(id); return; }
     const t = taskById(id); if(!t) return;
     t.status = el.checked ? 'completed' : 'pending';
@@ -793,6 +846,14 @@ function itemsByDateMap(){
     const viewModel = { id:a.id, title:'📋 '+a.title, date:a.expectedCompletionDate, time:a.expectedCompletionTime, priority:a.priority, status:normalizedStatus, kind:'assignment' };
     if(!map.has(a.expectedCompletionDate)) map.set(a.expectedCompletionDate, []);
     map.get(a.expectedCompletionDate).push(viewModel);
+  });
+  // WBCYN deadlines (v1.6.0 integration) — same lightweight view-model
+  // trick, sourced live from wbcynDeadlineItems() (see WBCYN INTEGRATION
+  // block above). Labeled "Source: WBCYN" wherever items are rendered with
+  // a kind, via the 🏛️ icon prefix already baked into the title.
+  wbcynDeadlineItems().forEach((w)=>{
+    if(!map.has(w.date)) map.set(w.date, []);
+    map.get(w.date).push(w);
   });
   return map;
 }
@@ -2845,6 +2906,7 @@ function showLockScreen(onUnlock){
 
 async function init(){
   await loadDB();
+  await loadWbcynBridge();
   applyTheme();
   applyFontSize();
   renderHeader();

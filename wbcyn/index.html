@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<title>WBCYN Registrar Dashboard</title>
+<title>WBCYN e-Office &amp; Administrative Control System</title>
 
 <!-- PWA: this app is part of the JM Digital Office project. The manifest and
      service worker are shared and live at the project root. -->
@@ -21,8 +21,7 @@
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="../home-nav.css">
 <!-- Chart.js: loaded from CDN and cached by the service worker on first successful load,
-     so report charts keep working offline afterwards. If the very first launch is offline,
-     charts show a text fallback until a connection is available once. -->
+     so report charts (Legacy Reports tab) keep working offline afterwards. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 </head>
 <body>
@@ -30,12 +29,15 @@
 <header class="appheader no-print">
   <div class="header-left">
     <a class="home-link" href="../index.html" title="Back to JM Digital Office">⌂ <span class="home-link-text">JM Digital Office</span></a>
-    <h1>WBCYN Registrar Dashboard</h1>
-    <p>Official Work Management System</p>
+    <h1>WBCYN e-Office &amp; Administrative Control System</h1>
+    <p>Official Work Management System — Registrar, WBCYN</p>
   </div>
   <div class="header-right">
     <div class="name" id="headerRegistrarName">Dr. M. Jahangir</div>
     <div class="role" id="headerRegistrarRole">Registrar, WBCYN</div>
+  </div>
+  <div class="header-actions no-print">
+    <button id="wbcynSearchBtn" class="notif-bell" title="Universal Search" aria-label="Universal Search" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:20px;padding:6px 12px;font-size:16px;">🔍</button>
   </div>
 </header>
 
@@ -48,8 +50,9 @@
 <div id="modalRoot"></div>
 <div id="pwaBannerRoot"></div>
 
-<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device</footer>
+<footer class="small-note no-print">West Bengal Council of Yoga and Naturopathy &middot; Data stored locally on this device &middot; v1.6.0</footer>
 
+<script src="idb.js"></script>
 <script src="../sw-update.js"></script>
 <script src="../home-nav.js"></script>
 <script src="app.js"></script>

@@ -14,7 +14,7 @@
 ============================================================================ */
 
 /* ================= OFFICE / GLOBAL CONFIG ================= */
-const WBCYN_VERSION = '1.6.1';
+const WBCYN_VERSION = '1.6.2';
 const DEFAULT_OFFICE_INFO = {
   registrarName: 'Dr. M. Jahangir',
   officeName: 'West Bengal Council of Yoga and Naturopathy',
@@ -365,6 +365,16 @@ function fieldsToHTML(sections, values){
   }).join('');
 }
 function allFields(cfg){ return cfg.sections.reduce((acc, s) => acc.concat(s.fields), []); }
+// Shared value-for-display logic for a single field on a single record —
+// used by CSV export, the Reports table, and anywhere else a plain string
+// (not the richer detail-view HTML) is needed. Staff-reference fields are
+// resolved through getStaffDisplayName so raw UUIDs never reach a CSV,
+// printed report, or table cell.
+function csvFieldValue(f, r){
+  const val = r[f.key];
+  if (f.staffRef) return getStaffDisplayName(val);
+  return Array.isArray(val) ? val.join('; ') : val;
+}
 function readFieldsFromForm(cfg, root){
   const data = {};
   allFields(cfg).forEach((f) => {
@@ -438,9 +448,10 @@ function openModuleDetail(cfg, id){
   const rows = cfg.sections.map((sec) => {
     const fieldsHtml = sec.fields.map((f) => {
       let val = rec[f.key];
-      if (f.type === 'date') val = fmtDate(val);
-      if (f.type === 'time') val = fmtTime(val);
-      if (Array.isArray(val)) val = val.join(', ');
+      if (f.staffRef) val = getStaffDisplayName(val, { withDesignation: true });
+      else if (f.type === 'date') val = fmtDate(val);
+      else if (f.type === 'time') val = fmtTime(val);
+      else if (Array.isArray(val)) val = val.join(', ');
       const full = (f.type === 'textarea' || f.full) ? 'full' : '';
       return `<div class="${full}"><div class="dl">${escapeHtml(f.label)}</div><div class="dv">${escapeHtml(val) || '—'}</div></div>`;
     }).join('');
@@ -525,7 +536,7 @@ function wireModuleHandlers(cfg){
   const exportBtn = document.querySelector('[data-modexport]');
   if (exportBtn) exportBtn.addEventListener('click', () => {
     const flds = allFields(cfg);
-    exportCSV(`WBCYN_${cfg.store}_${todayISO()}.csv`, ['Tracking ID'].concat(flds.map((f) => f.label)), moduleRecords(cfg).map((r) => [r.trackingId].concat(flds.map((f) => Array.isArray(r[f.key]) ? r[f.key].join('; ') : r[f.key]))));
+    exportCSV(`WBCYN_${cfg.store}_${todayISO()}.csv`, ['Tracking ID'].concat(flds.map((f) => f.label)), moduleRecords(cfg).map((r) => [r.trackingId].concat(flds.map((f) => csvFieldValue(f, r)))));
   });
   const printBtn = document.querySelector('[data-modprint]');
   if (printBtn) printBtn.addEventListener('click', () => window.print());
@@ -542,7 +553,29 @@ const SECTION_HANDLERS = {};
 /* ================= STAFF DIRECTORY ================= */
 function activeStaff(){ return wdb.wbcynStaff.filter((s) => s.status !== 'Inactive'); }
 function staffById(id){ return wdb.wbcynStaff.find((s) => s.id === id); }
-function staffName(id){ const s = staffById(id); return s ? s.name : '(unassigned)'; }
+// Canonical staff-UUID resolver — every user-facing surface that shows a
+// staff reference (assignedToStaffId, markedToStaffId, responsibleStaffId,
+// actionAssignedToStaffId, staffAssignedId, pioStaffId, ...) must go through
+// this instead of interpolating the raw id, or through getStaffListDisplay
+// for a field holding more than one id. Handles the two cases a raw id
+// would otherwise leak in: the staff member was later marked Inactive
+// (historical records must keep showing their name), or the id no longer
+// matches any record at all (never surface the UUID itself).
+function getStaffDisplayName(staffId, opts){
+  opts = opts || {};
+  if (!staffId) return opts.emptyText !== undefined ? opts.emptyText : '';
+  const s = staffById(staffId);
+  if (!s) return 'Unknown Staff';
+  const inactiveSuffix = s.status === 'Inactive' ? ' (Inactive)' : '';
+  if (opts.withDesignation && s.designation) return `${s.name}${inactiveSuffix} — ${s.designation}`;
+  return `${s.name}${inactiveSuffix}`;
+}
+function getStaffListDisplay(staffIds, opts){
+  if (!staffIds) return '';
+  const ids = Array.isArray(staffIds) ? staffIds : [staffIds];
+  return ids.filter(Boolean).map((id) => getStaffDisplayName(id, opts)).join(', ');
+}
+function staffName(id){ return id ? getStaffDisplayName(id) : '(unassigned)'; }
 function staffOptions(){ return activeStaff().map((s) => ({ value: s.id, label: s.name + (s.designation ? ' — ' + s.designation : '') })); }
 
 WBCYN_MODULES.staff = {
@@ -672,7 +705,7 @@ WBCYN_MODULES.assignments = {
     ] },
     { title: 'Assignment Details', fields: [
       { key: 'assignedBy', label: 'Assigned By', type: 'text' },
-      { key: 'assignedToStaffId', label: 'Assigned To', type: 'select', options: staffOptions, required: true },
+      { key: 'assignedToStaffId', label: 'Assigned To', type: 'select', options: staffOptions, required: true, staffRef: true },
       { key: 'additionalStaff', label: 'Additional Staff Involved', type: 'multiselect', options: () => activeStaff().map((s) => s.name) },
       { key: 'dateAssigned', label: 'Date Assigned', type: 'date' },
       { key: 'timeAssigned', label: 'Time Assigned', type: 'time' },
@@ -905,7 +938,7 @@ WBCYN_MODULES.inward = {
       { key: 'receivedBy', label: 'Received By', type: 'text' },
       { key: 'placedBeforeRegistrarDate', label: 'Placed Before Registrar Date', type: 'date' },
       { key: 'registrarDirection', label: 'Registrar’s Direction', type: 'textarea' },
-      { key: 'markedToStaffId', label: 'Marked To Staff', type: 'select', options: staffOptions },
+      { key: 'markedToStaffId', label: 'Marked To Staff', type: 'select', options: staffOptions, staffRef: true },
       { key: 'dateAssignedToStaff', label: 'Date Assigned', type: 'date' },
       { key: 'actionDeadline', label: 'Action Deadline', type: 'date' },
       { key: 'relatedFileNumber', label: 'Related WBCYN File Number', type: 'text' },
@@ -1007,7 +1040,7 @@ WBCYN_MODULES.outward = {
       { key: 'expectedReplyDate', label: 'Expected Reply Date', type: 'date' },
       { key: 'followUpRequired', label: 'Follow-up Required', type: 'select', options: ['Yes', 'No'] },
       { key: 'nextFollowUpDate', label: 'Next Follow-up Date', type: 'date' },
-      { key: 'responsibleStaffId', label: 'Responsible Staff', type: 'select', options: staffOptions },
+      { key: 'responsibleStaffId', label: 'Responsible Staff', type: 'select', options: staffOptions, staffRef: true },
       { key: 'numReminders', label: 'Number of Reminders', type: 'number' },
       { key: 'lastReminderDate', label: 'Last Reminder Date', type: 'date' },
       { key: 'pendingReason', label: 'Current Pending Reason', type: 'text' },
@@ -1081,7 +1114,7 @@ WBCYN_MODULES.files = {
       { key: 'relatedCourtCaseId', label: 'Related Court Matters', type: 'select', options: () => wdb.wbcynLegalMatters.map((r) => ({ value: r.id, label: r.trackingId + ' — ' + (r.caseNumber || '') })) },
       { key: 'relatedMeetingId', label: 'Related Meetings', type: 'select', options: () => wdb.wbcynMeetings.map((r) => ({ value: r.id, label: r.trackingId + ' — ' + (r.meetingTitle || '') })) },
       { key: 'relatedInstitutions', label: 'Related Institutions', type: 'text' },
-      { key: 'responsibleStaffId', label: 'Responsible WBCYN Staff', type: 'select', options: staffOptions },
+      { key: 'responsibleStaffId', label: 'Responsible WBCYN Staff', type: 'select', options: staffOptions, staffRef: true },
       { key: 'attachmentReferences', label: 'Attachment References', type: 'text' },
     ] },
     { title: 'Follow-up', fields: [
@@ -1249,7 +1282,7 @@ WBCYN_MODULES.replies = {
     { title: 'Action Required', fields: [
       { key: 'actionRequired', label: 'Action Required', type: 'textarea' },
       { key: 'actionPriority', label: 'Action Priority', type: 'select', options: PRIORITIES },
-      { key: 'actionAssignedToStaffId', label: 'Action Assigned To', type: 'select', options: staffOptions },
+      { key: 'actionAssignedToStaffId', label: 'Action Assigned To', type: 'select', options: staffOptions, staffRef: true },
       { key: 'actionDeadline', label: 'Action Deadline', type: 'date' },
       { key: 'registrarRemarks', label: 'Registrar’s Remarks', type: 'textarea' },
       { key: 'status', label: 'Status', type: 'select', options: REPLY_STATUSES, required: true },
@@ -1418,7 +1451,7 @@ WBCYN_MODULES.legal = {
       { key: 'briefOrderSummary', label: 'Brief Order Summary', type: 'textarea' },
       { key: 'complianceRequired', label: 'Compliance Required', type: 'select', options: ['Yes', 'No'] },
       { key: 'complianceDeadline', label: 'Compliance Deadline', type: 'date' },
-      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions },
+      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions, staffRef: true },
       { key: 'documentsRequired', label: 'Documents Required', type: 'textarea' },
       { key: 'status', label: 'Current Status', type: 'select', options: LEGAL_STATUSES, required: true },
       { key: 'remarks', label: 'Remarks', type: 'textarea' },
@@ -1445,7 +1478,7 @@ WBCYN_MODULES.rti = {
       { key: 'applicantName', label: 'Applicant Name', type: 'text', required: true },
       { key: 'subject', label: 'Subject', type: 'text' },
       { key: 'informationRequested', label: 'Information Requested', type: 'textarea' },
-      { key: 'pioStaffId', label: 'PIO or Responsible Officer', type: 'select', options: staffOptions },
+      { key: 'pioStaffId', label: 'PIO or Responsible Officer', type: 'select', options: staffOptions, staffRef: true },
     ] },
     { title: 'Deadlines and Reply', fields: [
       { key: 'replyDeadline', label: 'Reply Deadline', type: 'date' },
@@ -1489,7 +1522,7 @@ WBCYN_MODULES.meetings = {
     { title: 'Resolutions, Actions and Follow-up', fields: [
       { key: 'resolutionsSummary', label: 'Resolutions', type: 'textarea' },
       { key: 'actionPointsSummary', label: 'Action Points', type: 'textarea' },
-      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions },
+      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions, staffRef: true },
       { key: 'deadline', label: 'Deadline', type: 'date' },
       { key: 'followUpDate', label: 'Follow-up Date', type: 'date' },
       { key: 'status', label: 'Status', type: 'select', options: MEETING_STATUSES, required: true },
@@ -1516,7 +1549,7 @@ WBCYN_MODULES.resolutions = {
     { title: 'Resolution / Action Point', fields: [
       { key: 'meetingId', label: 'Meeting', type: 'select', options: () => wdb.wbcynMeetings.map((r) => ({ value: r.id, label: r.trackingId + ' — ' + (r.meetingTitle || '') })), required: true },
       { key: 'resolutionText', label: 'Resolution / Action Point', type: 'textarea', required: true },
-      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions },
+      { key: 'staffAssignedId', label: 'Staff Assigned', type: 'select', options: staffOptions, staffRef: true },
       { key: 'deadline', label: 'Deadline', type: 'date' },
       { key: 'followUpDate', label: 'Follow-up Date', type: 'date' },
       { key: 'status', label: 'Status', type: 'select', options: RESOLUTION_STATUSES, required: true },
@@ -1809,7 +1842,7 @@ function renderWbcynReports(){
   const repTabs = reports.map((r, i) => `<button class="btn sm ${i === wstate.reportsIndex ? '' : 'grey'}" data-repidx="${i}">${escapeHtml(r.label)}</button>`).join(' ');
   const flds = allFields(cfg).slice(0, 7);
   const thead = '<tr><th>Tracking ID</th>' + flds.map((f) => `<th>${escapeHtml(f.label)}</th>`).join('') + '</tr>';
-  const rows = records.map((r) => `<tr><td>${escapeHtml(r.trackingId || '')}</td>${flds.map((f) => `<td>${escapeHtml(Array.isArray(r[f.key]) ? r[f.key].join(', ') : r[f.key]) || '—'}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${flds.length + 1}"><div class="empty-note">No records match this report.</div></td></tr>`;
+  const rows = records.map((r) => `<tr><td>${escapeHtml(r.trackingId || '')}</td>${flds.map((f) => `<td>${escapeHtml(csvFieldValue(f, r)) || '—'}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${flds.length + 1}"><div class="empty-note">No records match this report.</div></td></tr>`;
   return `
     <div class="section-title no-print">📈 Reports</div>
     <div class="subtabs no-print">${catTabs}</div>
@@ -1836,7 +1869,7 @@ SECTION_HANDLERS.reports = () => {
     const { report } = activeReport();
     const { cfg, records } = reportRecords(report);
     const flds = allFields(cfg);
-    exportCSV(`WBCYN_Report_${report.label.replace(/\s+/g, '_')}_${todayISO()}.csv`, ['Tracking ID'].concat(flds.map((f) => f.label)), records.map((r) => [r.trackingId].concat(flds.map((f) => Array.isArray(r[f.key]) ? r[f.key].join('; ') : r[f.key]))));
+    exportCSV(`WBCYN_Report_${report.label.replace(/\s+/g, '_')}_${todayISO()}.csv`, ['Tracking ID'].concat(flds.map((f) => f.label)), records.map((r) => [r.trackingId].concat(flds.map((f) => csvFieldValue(f, r)))));
   });
   const prt = document.getElementById('repPrint'); if (prt) prt.addEventListener('click', () => window.print());
 };
